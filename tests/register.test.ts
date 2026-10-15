@@ -1015,6 +1015,19 @@ describe('hold card', () => {
     })
   }
 
+  for (const kind of ['sdk', 'unclassified'] as const) {
+    test(`a ${kind} send is held like one typed at the prompt`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [])
+      await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      const first = await $.prompt.submit({ ...prompt('hi'), origin: { kind } })
+      expect(first.drop).toBe(HELD_DROP)
+      expect(w.entered).toEqual([])
+    })
+  }
+
   test('a desktop host that attaches after session.start gets the band, not the status entry', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [])

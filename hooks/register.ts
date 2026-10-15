@@ -382,12 +382,12 @@ export function heldFrom(s: State, text: string): Held {
   return { text, tokens: s.ctx, rate: price ? `$${price[1]}/MTok` : 'the cache-write rate', coldUsd: coldUsd(s), warmUsd: warmUsd(s) }
 }
 
-/** A plugin's resend expands no @file mention and carries no pasted item, so those prompts keep the refuse-once path. */
 /** Whether the send came from someone at a terminal or the desktop app, who sees the card. Remote Control, schedules, notifications and other sessions do not. */
 export function isAttended(origin: PromptOrigin): boolean {
   return origin.kind === 'composer' || origin.kind === 'sdk' || origin.kind === 'unclassified'
 }
 
+/** A plugin's resend expands no @file mention and carries no pasted item, so those prompts keep the refuse-once path. */
 export function canHold(text: string, attachments: readonly unknown[] | undefined): boolean {
   return !(attachments && attachments.length > 0) && !/(^|\s)@\S/.test(text)
 }
