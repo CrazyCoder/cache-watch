@@ -2,7 +2,7 @@
 // is held above the prompt with its price and three buttons, instead of being
 // dropped with the price as text. Everything else is upstream's.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderElement } from 'claude-code'
+import type { EngineInterface, PromptOrigin, Register, RenderElement } from 'claude-code'
 import type { Held, Receipt, ResumeNote } from '../types'
 import { statusIcons } from './status-icons'
 
@@ -383,6 +383,11 @@ export function heldFrom(s: State, text: string): Held {
 }
 
 /** A plugin's resend expands no @file mention and carries no pasted item, so those prompts keep the refuse-once path. */
+/** Whether the send came from someone at a terminal or the desktop app, who sees the card. Remote Control, schedules, notifications and other sessions do not. */
+export function isAttended(origin: PromptOrigin): boolean {
+  return origin.kind === 'composer' || origin.kind === 'sdk' || origin.kind === 'unclassified'
+}
+
 export function canHold(text: string, attachments: readonly unknown[] | undefined): boolean {
   return !(attachments && attachments.length > 0) && !/(^|\s)@\S/.test(text)
 }
@@ -953,6 +958,16 @@ export const register: Register = on => {
     if (s.guard === 'warn') {
       if (s.hasBand) s.note = 'Your message went straight through, because the guard is set to warn.'
       else $.ui.log(`${guardText(s, now)} Sending anyway; keepwarm will hold the cache for ${fmtDuration(AUTO_WARM_MS)} once it lands.`)
+      s.coldWritePending = true
+      await release($)
+      return next(e)
+    }
+    if (!isAttended(e.origin)) {
+      // The card's buttons draw on the terminal and the desktop app only: a phone, a schedule or another session could never press them.
+      if (s.hasBand) s.note = e.origin.kind === 'bridge'
+        ? 'Your message went straight through, because it came over Remote Control, where the card can\'t show.'
+        : 'Your message went straight through, because no one was at the prompt to choose on the card.'
+      else $.ui.log(`${guardText(s, now)} Sending anyway, because no one at this prompt sent it; keepwarm will hold the cache for ${fmtDuration(AUTO_WARM_MS)} once it lands.`)
       s.coldWritePending = true
       await release($)
       return next(e)

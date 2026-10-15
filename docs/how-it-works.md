@@ -46,6 +46,7 @@ Some messages are never held:
 - **Your first message after a resume card,** because the card already showed you the price. Where no card can draw, the plain line counts the same way, once it has been logged.
 - **Small conversations** under 50,000 tokens, where the re-write costs little.
 - **Messages with a pasted image or file, or an `@file` mention.** A mod can't resend those, so holding them would leave you with no button that works. They go through, and the price shows on the receipt pill.
+- **Messages no one at the prompt sent:** from Remote Control (a phone or the web), a schedule, a background task's notification or another session. The card's buttons draw only in the terminal and the desktop app, so no one there could press them. They go through, and the price shows on the receipt pill.
 - **Everything, when the guard is set to warn** (`/cache-watch guard warn`). Then cold sends go through and the price shows on the receipt pill.
 
 ## Keepwarm and pings

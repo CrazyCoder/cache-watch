@@ -354,6 +354,18 @@ describe('guard', () => {
     expect(w.logs.at(-1)).toMatch(/Sending anyway/)
   })
 
+  test('a Remote Control send with no band goes through and logs the price', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    const first = await $.prompt.submit({ ...prompt('hi'), origin: { kind: 'bridge' } })
+    expect(first.drop).toBe(undefined)
+    expect(w.entered).toEqual(['hi'])
+    expect(w.logs.at(-1)).toMatch(/Sending anyway, because no one at this prompt sent it/)
+  })
+
   test('a paid cold write is scored and arms keepwarm for three hours', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [warm, warm, warm, warm])
@@ -982,6 +994,24 @@ describe('hold card', () => {
       await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
       expect(await ui.find({ text: /Cold write paid: \$4\.00 for 200k tokens/ })).toBeTruthy()
       expect(await ui.find({ text: /Your message went straight through, because a message with an image or an @file mention can't be held\./ })).toBeTruthy()
+    })
+  }
+
+  for (const [kind, note] of [['bridge', /because it came over Remote Control, where the card can't show\./], ['scheduled-trigger', /because no one was at the prompt to choose on the card\./]] as const) {
+    test(`a ${kind} send goes through with the price, since no one there can press the card`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [])
+      await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
+      await $.turn.complete(turn())
+      await clock.advance(3 * HOUR)
+      const first = await $.prompt.submit({ ...prompt('where were we?'), origin: { kind } })
+      expect(first.drop).toBe(undefined)
+      expect(w.entered).toEqual(['where were we?'])
+      const ui = await $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'AbovePrompt', props: tallBand })
+      expect(await isHeld(ui)).toBe(false)
+      await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+      expect(await ui.find({ text: /Cold write paid: \$4\.00 for 200k tokens/ })).toBeTruthy()
+      expect(await ui.find({ text: note })).toBeTruthy()
     })
   }
 
