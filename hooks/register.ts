@@ -990,7 +990,8 @@ export const register: Register = on => {
 
   on('turn.step', async function* ($, e, next) {
     if (!e.agentId) s.lastRequestAt = await $.clock.now()
-    yield* next(e)
+    // Returned: a hook above reads the step's response from what this one returns.
+    return yield* next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
