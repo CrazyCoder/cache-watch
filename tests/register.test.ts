@@ -3162,6 +3162,21 @@ describe('messages on their way past a compaction', () => {
     expect(store.has('queued:S1')).toBe(false)
   })
 
+  test('a carried queue joins the one already waiting in the conversation it reaches', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['queued:S2', ['waiting']]])
+    let sid = 'S1'
+    world(on, [], { sid: () => sid, compact: hung, store })
+    on('command.run', { command: 'compact' }, () => new Promise<{ text: string }>(() => {}))
+    await start($, clock)
+    await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'bridge' } })
+    await clock.advance(1)
+    sid = 'S2'
+    await $.classic.SessionStart({ session_id: 'S2', source: 'resume' })
+    expect(store.get('queued:S2')).toEqual(['hi', 'waiting'])
+    expect(store.has('queued:S1')).toBe(false)
+  })
+
   test('a queue is sent when /resume reaches its conversation in a running process', { options: { coldCompact: true } }, async ($, on) => {
     const clock = mock.clock(on, { now: START })
     let sid = 'S1'

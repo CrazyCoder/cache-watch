@@ -456,7 +456,7 @@ async function stop($: EngineInterface, s: State, why: string | null, forgetAlwa
 async function endConversation($: EngineInterface, s: State, reason: 'clear' | 'resume') {
   // Claimed before any await: a second end or a classic start for the same conversation finds it already gone, and an
   // end cut short by its budget leaves no timer and no old id behind, only the keys below.
-  const keys = [deadlineKey(s), everyKey(s), queueKey(s)]
+  const keys = [deadlineKey(s), everyKey(s)]
   const ending = s.sid
   resetForClear(s)
   s.sid = ''
@@ -493,10 +493,15 @@ async function reseat($: EngineInterface, s: State) {
   // The host still answers with the conversation being ended: the next one is not there to seat yet, so nothing is
   // seated under the old id, and a window opened meanwhile waits in memory for the id it belongs to.
   if (id === s.endingSid) return
+  const left = `${KEY_QUEUED}:${s.endingSid}`
   const now = await seat($, s, id)
-  // Messages waiting on a compaction follow the person into this conversation; any queued here wait no longer.
-  if (s.compacting) await $.store.set(queueKey(s), s.compacting)
-  else await sendQueued($, s)
+  // Messages waiting on a compaction follow the person into this conversation, after any queued here; the old copy goes last.
+  if (s.compacting) {
+    const here = await $.store.get(queueKey(s))
+    if (Array.isArray(here)) s.compacting.push(...here.filter(text => typeof text === 'string'))
+    await $.store.set(queueKey(s), s.compacting)
+    await $.store.delete(left)
+  } else await sendQueued($, s)
   if (s.always) await armAlways($, s, now)
   // A window carried over, or armed while the conversation was ending, is written under this id.
   else if (s.deadline) await startWindow($, s, s.deadline - now, s.every)
