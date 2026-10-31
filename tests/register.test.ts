@@ -3281,3 +3281,40 @@ describe('previews and the dry run', () => {
     expect((await $.command.run(run('cache-watch', 'dry-run'))).text).toMatch(/the coldCompact option is off/)
   })
 })
+
+describe('closing the hold card', () => {
+  const cold = async ($: Parameters<TestBody>[0], clock: { advance(ms: number): Promise<unknown> }) => {
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    return $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
+  }
+
+  test('Close puts the message back unsent, and sending it meets the card again', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    const filled: string[] = []
+    on('prompt.fill', ($, e) => { filled.push(e.text); return { isFilled: true } })
+    const ui = await cold($, clock)
+    await $.prompt.submit(prompt('hi'))
+    await ui.press({ key: 'close' })
+    expect(await ui.find({ text: /Your message is on hold/ })).toBe(undefined)
+    expect(filled).toEqual(['hi'])
+    expect(w.entered).toEqual([])
+    await $.prompt.submit(prompt('hi'))
+    expect(await ui.find({ text: /Your message is on hold/ })).toBeTruthy()
+    expect(w.entered).toEqual([])
+    expect((await $.command.run(run('cache-watch', 'close'))).text).toMatch(/back in the box/)
+    expect(filled).toEqual(['hi', 'hi'])
+  })
+
+  test('Close on a preview fills nothing, and no card to close says so', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [])
+    const ui = await cold($, clock)
+    expect((await $.command.run(run('cache-watch', 'close'))).text).toBe('cache-watch: no message is on hold')
+    await $.command.run(run('cache-watch', 'preview'))
+    await ui.press({ key: 'close' })
+    expect(await ui.find({ text: /Your message is on hold/ })).toBe(undefined)
+  })
+})

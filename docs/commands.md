@@ -32,6 +32,7 @@ The reason shows in `/keepwarm status` and on the `/cache-watch` card.
 | `/cache-watch pay` | Sends the held message and pays the cold write, as the **Pay and send** button does. |
 | `/cache-watch fresh` | Runs `/clear` and puts the held message back in the prompt box, as **Start fresh** does. With no message held and the resume card showing, it only runs `/clear`. |
 | `/cache-watch compact` | Compacts, then sends the held message, as **Compact and send** does; with no message held and the resume card up, compacts only. Needs the `coldCompact` option. |
+| `/cache-watch close` | Closes the hold card and puts the message back in the prompt box unsent, as **Close** does. |
 | `/cache-watch dismiss` | Closes the resume card, as its **Dismiss** button does. |
 | `/cache-watch preview` | Shows the hold card with this session's numbers, holding nothing. Any button closes it. A session under 50,000 tokens borrows 400,000. |
 | `/cache-watch preview resume` | Shows the resume card. Its buttons only close it: nothing is cleared or compacted. |

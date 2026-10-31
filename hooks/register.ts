@@ -845,6 +845,16 @@ async function startFresh($: EngineInterface) {
   await $.prompt.fill({ text: h.text })
 }
 
+/** Closes the hold card and puts the message back in the box unsent; sent from there, it meets the card again. */
+async function closeCard($: EngineInterface, s: State) {
+  const h = await read($, held)
+  if (!h) return
+  await release($)
+  if (h.isPreview) return
+  s.ackedAt = 0
+  await $.prompt.fill({ text: h.text })
+}
+
 /** Start fresh from the resume card: nothing is held, so it only clears. */
 async function freshFromResume($: EngineInterface) {
   const note = await read($, resumed)
@@ -1122,8 +1132,10 @@ export const register: Register = (on, options) => {
         ...(s.coldCompact ? [Button({ key: 'compact', label: 'Compact and send', onPress: () => { void compactAndSend($, s) } })] : []),
         Button({ key: 'fresh', label: 'Start fresh', onPress: () => { void startFresh($) } }),
         Button({ key: 'status', label: isOpen ? 'Hide cache status' : 'Show cache status', plain: true, onPress: () => { void update($, showStatus, open => !open) } }),
+        Button({ key: 'close', label: 'Close', plain: true, onPress: () => { void closeCard($, s) } }),
       ] })
-      return Box({ flexDirection: 'column', gap: compact ? 0 : 1, children: [rest, holdCard, buttons] })
+      // Desktop buttons stand taller than a text row, so without a gap they ride up over the card.
+      return Box({ flexDirection: 'column', gap: compact && e.surface !== 'desktop' ? 0 : 1, children: [rest, holdCard, buttons] })
     }
     // A cold resume's note, styled like the compact hold card, in place of a transcript line no hook can restyle.
     const note = await read($, resumed)
@@ -1166,7 +1178,7 @@ export const register: Register = (on, options) => {
           stats,
           Text({ wrap: 'wrap', children: [RESUME_TIP] }),
         ] }),
-        Box({ key: 'resume-buttons', flexDirection: 'row', gap: 2, alignItems: 'center', children: [
+        Box({ key: 'resume-buttons', flexDirection: 'row', gap: 2, alignItems: 'center', marginTop: e.surface === 'desktop' ? 1 : 0, children: [
           ...(s.coldCompact ? [Button({ key: 'resume-compact', label: 'Compact', onPress: () => { void compactFromResume($, s) } })] : []),
           Button({ key: 'resume-fresh', label: 'Start fresh', onPress: () => { void freshFromResume($) } }),
           Button({ key: 'resume-dismiss', label: 'Dismiss', plain: true, onPress: () => { void update($, resumed, () => null) } }),
@@ -1280,7 +1292,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'cache-watch',
       description: 'Prompt cache state, cold price and this session\'s cold writes; guard warn|refuse (cache-watch, the Mod)',
-      argumentHint: '[status | preview [hold|resume|receipt|compacted] | dry-run | pay | compact | fresh | dismiss | guard warn | guard refuse | footer on|off]',
+      argumentHint: '[status | preview [hold|resume|receipt|compacted] | dry-run | pay | compact | fresh | close | dismiss | guard warn | guard refuse | footer on|off]',
       immediate: true,
     })
     // The hook form of cache-tax ships a /cache-tax:status skill; both installed means two guards.
@@ -1385,6 +1397,11 @@ export const register: Register = (on, options) => {
       // Compacting waits on this dispatch, so it starts once the command returns.
       $.clock.after(0, () => { void (h ? compactAndSend($, s) : compactFromResume($, s)) })
       return { text: h ? 'cache-watch: compacting, then the held message goes out' : 'cache-watch: compacting' }
+    }
+    if (words[0] === 'close') {
+      if (!(await read($, held))) return { text: 'cache-watch: no message is on hold' }
+      await closeCard($, s)
+      return { text: 'cache-watch: closed; your message is back in the box' }
     }
     if (words[0] === 'dismiss') {
       if (!(await read($, resumed))) return { text: 'cache-watch: nothing to dismiss' }

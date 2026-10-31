@@ -108,6 +108,7 @@ Then restart the app again. A running session keeps the copy it started with.
 | `/cache-watch pay` | Same as the Pay and send button |
 | `/cache-watch compact` | Same as the Compact and send button, with the `coldCompact` option |
 | `/cache-watch fresh` | Same as the Start fresh button, on the hold card or the resume card |
+| `/cache-watch close` | Same as the Close button: the message goes back in the prompt box unsent |
 | `/cache-watch dismiss` | Close the resume card |
 | `/cache-watch preview` | Show the hold card with this session's numbers, without holding anything; `resume`, `receipt` or `compacted` shows that card instead |
 | `/cache-watch dry-run` | Say what a message from a phone would meet right now, without sending anything |
