@@ -103,6 +103,8 @@ export type State = {
   compacting: string[] | null
   /** The context before the compaction a send just went through, for its receipt; 0 when none. */
   compactedFrom: number
+  /** Compactions seen: a turn clears `compacted`, so only a count says one happened. */
+  compactions: number
 }
 
 /** What this turn's main requests wrote before any compaction it saw, priced per request where the steps reported usage. */
@@ -331,6 +333,7 @@ function statusText(s: State, now: number): string | undefined {
     : isCold(s, now) ? ` · cold now, first ping ${fmtDuration(s.every)} after the next turn`
     : s.waitForTurn ? ' · nothing to fork yet, first ping after the next turn'
     : s.retries ? ` · API busy, ping retry ${s.retries} of ${MAX_RETRIES}`
+    : s.every >= s.ttlMs ? ` · no pings on a ${fmtDuration(s.ttlMs)} cache`
     : ` · ping in ${fmtDuration(s.lastRequestAt + s.every - now)}`
   return `keepwarm ${fmtDuration(s.deadline - now)} left${nextText}${pingText}`
 }
@@ -520,7 +523,7 @@ async function ping($: EngineInterface, s: State) {
   s.pending = null
   if (!s.deadline) return
   // Read before the clock: a subscription that just went past its limits has five minutes, and a ping on that pays the whole write.
-  await readTtl($, s)
+  await readTtl($, s).catch(() => undefined)
   const tick = s.tick
   const now = await $.clock.now()
   // A timer set or cancelled while the clock was read (an extension, a retry, a turn) owns the window now;
@@ -670,19 +673,22 @@ const resumed = atom({ plugin: 'cache-watch', key: 'resumed' } as const, null)
 const snapshot = atom({ plugin: 'cache-watch', key: 'snapshot' } as const, null)
 
 async function remember($: EngineInterface, s: State) {
-  const { sid, lastRequestAt, lastModel, ctx, compacted, ackedAt, misses, last, stopped } = s
+  const { sid, lastRequestAt, lastModel, ctx, compacted, ackedAt, last, stopped } = s
+  const misses = [...s.misses]
   await update($, snapshot, () => ({ sid, lastRequestAt, lastModel, ctx, compacted, ackedAt, misses, last, stopped }))
 }
 
 /** Puts back what the mod knew before a reload, when it was about this conversation. */
 export function restore(s: State, saved: Snapshot | null, sid: string) {
-  if (saved?.sid === sid) Object.assign(s, saved)
+  // A copy: the host keeps the saved value, and misses grows in place.
+  if (saved?.sid === sid) Object.assign(s, structuredClone(saved))
 }
 
 /** How long a cold resume waits for a band before it logs its plain line instead: the desktop app attaches after the session starts. */
 export const RESUME_LOG_AFTER_MS = 3000
 export const RECEIPT_MS = 15 * 60 * 1000
 export const HELD_DROP = 'Held by Cache Watch. Choose an option above the prompt box, or send it again to pay.'
+export const COMPACT_WAIT_MS = 2 * 60 * 1000
 export const COMPACTING_DROP = 'Cache Watch: the cache is cold, so this session compacts first and your message follows.'
 const QUOTE_MAX = 160
 
@@ -838,6 +844,7 @@ async function freshFromResume($: EngineInterface) {
 async function afterCompact($: EngineInterface, s: State) {
   await release($)
   markCompacted(s)
+  s.compactions++
   s.ctx = 0
   disarm(s)
   await arm($, s)
@@ -847,32 +854,38 @@ async function afterCompact($: EngineInterface, s: State) {
 /**
  * Compacts between turns. A hook cannot: both calls refuse inside `prompt.submit`, whose turn they would wait on.
  * An SDK session, as the desktop app runs, has no `$.session.compact`; `/compact` there resolves once it is done, and its
- * session.compact reaches this mod's hook. A refusal, from JetCompact or the engine, leaves `compacted` false.
+ * session.compact reaches this mod's hook. Resolves whether it compacted; a refusal, from JetCompact or the engine, is false.
+ * One that outlasts COMPACT_WAIT_MS counts as refused, because messages wait on the answer.
  */
-async function compactNow($: EngineInterface, s: State) {
-  try {
-    const { skip } = await $.session.compact()
-    if (skip === undefined) await afterCompact($, s)
-  } catch {
-    await $.command.run({ command: 'compact' }).catch(() => undefined)
+async function compactNow($: EngineInterface, s: State): Promise<boolean> {
+  const seen = s.compactions
+  const compact = async () => {
+    try {
+      const { skip } = await $.session.compact()
+      if (skip === undefined) await afterCompact($, s)
+    } catch {
+      await $.command.run({ command: 'compact' }).catch(() => undefined)
+    }
   }
+  await Promise.race([compact(), new Promise<void>(done => { $.clock.after(COMPACT_WAIT_MS, done) })])
+  return s.compactions !== seen
 }
 
 /** Compacts, then sends what waited for it. Sent whatever the compaction did: a message that vanished would cost more than a cold write. */
 async function compactThenSend($: EngineInterface, s: State, why: string) {
   const before = s.ctx
-  await compactNow($, s)
+  const compacted = await compactNow($, s)
   const texts = s.compacting ?? []
   s.compacting = null
   s.ackedAt = 0
-  if (s.compacted) {
+  if (compacted) {
     s.compactedFrom = before
     s.note = `Compacted from ${fmtTok(before)} tokens first, ${why}.`
   } else {
     s.coldWritePending = true
-    s.note = `The compaction was refused, so this paid the whole write ${why}.`
+    s.note = 'The compaction was refused, so this paid the whole write.'
   }
-  $.ui.log(s.compacted ? `compacted from ${fmtTok(before)} tokens before sending, ${why}.` : `the compaction was refused, so the message went out cold, ${why}.`)
+  $.ui.log(compacted ? `compacted from ${fmtTok(before)} tokens before sending, ${why}.` : 'the compaction was refused, so the message went out cold.')
   for (const text of texts) await $.prompt.submit({ text, asUser: true })
 }
 
@@ -888,8 +901,7 @@ async function compactAndSend($: EngineInterface, s: State) {
 /** Compact from the resume card: nothing is held, so the next message is simply small. */
 async function compactFromResume($: EngineInterface, s: State) {
   await update($, resumed, () => null)
-  await compactNow($, s)
-  if (!s.compacted) $.ui.toast('cache-watch: the conversation was not compacted.')
+  if (!(await compactNow($, s))) $.ui.toast('cache-watch: the conversation was not compacted.')
 }
 
 /** A surface that never drew the band gets the resume note as the plain line upstream logged. */
@@ -915,7 +927,7 @@ export function freshState(): State {
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null, note: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '',
-    ttlMs: TTL_1H_MS, ttlSource: 'not read yet', windowMs: DEFAULT_WINDOW_MS, alwaysOption: false, cutoffMinutes: null, coldCompact: false, compacting: null, compactedFrom: 0,
+    ttlMs: TTL_1H_MS, ttlSource: 'not read yet', windowMs: DEFAULT_WINDOW_MS, alwaysOption: false, cutoffMinutes: null, coldCompact: false, compacting: null, compactedFrom: 0, compactions: 0,
   }
 }
 
@@ -1167,7 +1179,7 @@ export const register: Register = (on, options) => {
     light = typeof theme === 'string' && theme.startsWith('light')
     noColor = Boolean(await $.env.get('NO_COLOR'))
     if (s.hasBand) $.ui.status(undefined)
-    await readTtl($, s)
+    await readTtl($, s).catch(() => undefined)
     restore(s, await read($, snapshot), await $.session.id())
     const now = await seat($, s)
     await prune($, s, now)
@@ -1180,7 +1192,7 @@ export const register: Register = (on, options) => {
     s.always = await readAlways($, s)
     const savedFooter = await $.store.get(KEY_FOOTER)
     footer = savedFooter === 'off' ? 'off' : 'on'
-    // Always means a fresh default window every session, whatever the last one left behind.
+    // Always means a default window at least, whatever the last session left behind.
     if (s.always) await armAlways($, s, now)
     // The classic start arms a restored window too, but a managed plugin above this tier may continue beneath it; arming twice leaves one timer.
     else if (s.deadline) await arm($, s)

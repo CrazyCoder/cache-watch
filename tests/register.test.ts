@@ -3,7 +3,7 @@ import type { Plugin, TestBody } from 'claude-code/testing'
 import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
-import { COMPACTING_DROP, HELD_DROP, RESUME_LOG_AFTER_MS, autoWindow, bar, canHold, compactStatsSvg, fmtDuration, footerLabel, freshState, isRemote, parseCutoff, parseDuration, quoted, resetForClear, resolveTtl, restore, resumeNoteFrom, seedFromResume, statsSvg, warmShare } from '../hooks/register'
+import { COMPACTING_DROP, COMPACT_WAIT_MS, HELD_DROP, RESUME_LOG_AFTER_MS, autoWindow, bar, canHold, compactStatsSvg, fmtDuration, footerLabel, freshState, isRemote, parseCutoff, parseDuration, quoted, resetForClear, resolveTtl, restore, resumeNoteFrom, seedFromResume, statsSvg, warmShare } from '../hooks/register'
 
 tier('user')
 
@@ -3061,5 +3061,22 @@ describe('compacting a cold send', () => {
     expect(await ui.find({ text: /Resuming a cold chat/ })).toBe(undefined)
     expect(w.entered).toEqual([])
     expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/state       reset by compaction/)
+  })
+})
+
+describe('a compaction that never answers', () => {
+  test('the messages go out cold after the wait, and later sends are not held back', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { compact: () => { throw new Error('headless') } })
+    on('command.run', { command: 'compact' }, () => new Promise<{ text: string }>(() => {}))
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'bridge' } })
+    await clock.advance(1)
+    expect(w.entered).toEqual([])
+    await clock.advance(COMPACT_WAIT_MS)
+    expect(w.entered).toEqual(['hi'])
+    expect(w.logs.at(-1)).toBe('the compaction was refused, so the message went out cold.')
   })
 })
