@@ -3213,3 +3213,71 @@ describe('messages on their way past a compaction', () => {
     expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/lifetime    5m/)
   })
 })
+
+describe('previews and the dry run', () => {
+  const opened = async ($: Parameters<TestBody>[0]) => {
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
+    return $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'AbovePrompt', props: { ...bandProps, maxRows: 40 } })
+  }
+
+  test('the resume preview clears and compacts nothing, whichever button is pressed', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let cleared = 0
+    world(on, [])
+    on('command.run', { command: 'clear' }, () => { cleared++; return { text: '' } })
+    const ui = await opened($)
+    for (const key of ['resume-fresh', 'resume-compact', 'resume-dismiss']) {
+      await $.command.run(run('cache-watch', 'preview resume'))
+      expect(await ui.find({ text: /Resuming a cold chat \(preview\)/ })).toBeTruthy()
+      await ui.press({ key })
+      await clock.advance(1)
+      expect(await ui.find({ text: /Resuming a cold chat/ })).toBe(undefined)
+    }
+    expect(cleared).toBe(0)
+    expect((await $.command.run(run('cache-watch', ''))).text).not.toMatch(/reset by compaction/)
+  })
+
+  test('/cache-watch fresh on the resume preview clears nothing', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let cleared = 0
+    world(on, [])
+    on('command.run', { command: 'clear' }, () => { cleared++; return { text: '' } })
+    await opened($)
+    await $.command.run(run('cache-watch', 'preview resume'))
+    await $.command.run(run('cache-watch', 'fresh'))
+    await clock.advance(1)
+    expect(cleared).toBe(0)
+  })
+
+  test('the receipt previews draw with a fresh session, which borrows a size', async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [])
+    const ui = await opened($)
+    await $.command.run(run('cache-watch', 'preview receipt'))
+    expect(await ui.find({ text: /Cold write paid: \$8\.00 for 400k tokens.*Preview: nothing was paid/ })).toBeTruthy()
+    await $.command.run(run('cache-watch', 'preview compacted'))
+    expect(await ui.find({ text: /Cold write paid: \$1\.00 for 50k tokens.*Preview: compacted from 400k tokens first/ })).toBeTruthy()
+    expect((await $.command.run(run('cache-watch', 'preview nonsense'))).text).toMatch(/preview takes hold, resume, receipt or compacted/)
+  })
+
+  test('the dry run follows the order prompt.submit decides in, and acts on nothing', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await opened($)
+    await $.turn.complete(turn())
+    expect((await $.command.run(run('cache-watch', 'dry-run'))).text).toMatch(/the cache is not cold/)
+    await clock.advance(3 * HOUR)
+    expect((await $.command.run(run('cache-watch', 'dry-run'))).text).toBe('cache-watch: it would compact 201k tokens first, then send the message. With an image or an @file mention it would go out cold, for $4.01. Nothing was sent or compacted.')
+    expect(w.entered).toEqual([])
+    expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/state       COLD/)
+  })
+
+  test('the dry run names the option when it is off', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [])
+    await opened($)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    expect((await $.command.run(run('cache-watch', 'dry-run'))).text).toMatch(/the coldCompact option is off/)
+  })
+})

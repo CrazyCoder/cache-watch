@@ -33,7 +33,11 @@ The reason shows in `/keepwarm status` and on the `/cache-watch` card.
 | `/cache-watch fresh` | Runs `/clear` and puts the held message back in the prompt box, as **Start fresh** does. With no message held and the resume card showing, it only runs `/clear`. |
 | `/cache-watch compact` | Compacts, then sends the held message, as **Compact and send** does; with no message held and the resume card up, compacts only. Needs the `coldCompact` option. |
 | `/cache-watch dismiss` | Closes the resume card, as its **Dismiss** button does. |
-| `/cache-watch preview` | Shows the hold card with this session's numbers, holding nothing. Any button closes it. |
+| `/cache-watch preview` | Shows the hold card with this session's numbers, holding nothing. Any button closes it. A session under 50,000 tokens borrows 400,000. |
+| `/cache-watch preview resume` | Shows the resume card. Its buttons only close it: nothing is cleared or compacted. |
+| `/cache-watch preview receipt` | Shows the receipt of a paid cold write. Nothing was paid; it goes at your next message. |
+| `/cache-watch preview compacted` | Shows the receipt of a send that compacted first. |
+| `/cache-watch dry-run` | Says what a message from a phone would meet right now. Sends and compacts nothing. |
 | `/cache-watch guard refuse` | Holds a cold send once on the card. This is the default. |
 | `/cache-watch guard warn` | Lets cold sends through and shows the price on the receipt pill afterwards. |
 | `/cache-watch footer on` | Shows the status in the prompt footer. This is the default. |

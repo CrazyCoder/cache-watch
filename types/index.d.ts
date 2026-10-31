@@ -38,6 +38,8 @@ export type ResumeNote = {
   coldUsd: number | null
   /** The same context at the cache-read rate. */
   warmUsd: number | null
+  /** Shown by `/cache-watch preview resume`: every button only closes the card. */
+  isPreview?: boolean
 }
 
 /** What must outlive a reload of the mod, which runs register again with no classic.SessionStart after it. */

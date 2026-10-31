@@ -703,6 +703,7 @@ export const RESUME_LOG_AFTER_MS = 3000
 export const RECEIPT_MS = 15 * 60 * 1000
 export const HELD_DROP = 'Held by Cache Watch. Choose an option above the prompt box, or send it again to pay.'
 export const COMPACT_WAIT_MS = 2 * 60 * 1000
+const PREVIEW_TOKENS = 400000
 export const COMPACTING_DROP = 'Cache Watch: the cache is cold, so this session compacts first and your message follows.'
 const QUOTE_MAX = 160
 
@@ -846,7 +847,9 @@ async function startFresh($: EngineInterface) {
 
 /** Start fresh from the resume card: nothing is held, so it only clears. */
 async function freshFromResume($: EngineInterface) {
+  const note = await read($, resumed)
   await update($, resumed, () => null)
+  if (note?.isPreview) return
   try {
     await $.command.run({ command: 'clear' })
   } catch {
@@ -947,7 +950,9 @@ async function compactAndSend($: EngineInterface, s: State) {
 
 /** Compact from the resume card: nothing is held, so the next message is simply small. */
 async function compactFromResume($: EngineInterface, s: State) {
+  const note = await read($, resumed)
   await update($, resumed, () => null)
+  if (note?.isPreview) return
   if (!(await compactNow($, s))) $.ui.toast('cache-watch: the conversation was not compacted.')
 }
 
@@ -956,6 +961,26 @@ async function resumeFallback($: EngineInterface, s: State, line: string) {
   if (s.hasBand || !(await read($, resumed))) return
   await update($, resumed, () => null)
   $.ui.log(line)
+}
+
+/** The state a preview draws from: a session too small to hold a send borrows a size that would be. */
+function previewState(s: State): State {
+  return s.ctx >= BIG_TOKENS ? s : { ...s, ctx: PREVIEW_TOKENS }
+}
+
+function previewUsd(s: State, tokens: number): number | null {
+  const price = priceOf(s.lastModel, tokens)
+  return price ? tokens * price[1] / 1e6 : null
+}
+
+/** What a message from a phone would meet right now, in the order `prompt.submit` decides it. */
+export function remoteDryRun(s: State, now: number): string {
+  if (s.compacting) return 'a compaction is under way, so it would wait and go out after it.'
+  if (!isCold(s, now)) return 'the cache is not cold, so it would go straight through.'
+  if (s.ctx < BIG_TOKENS) return `the cache is cold, but ${fmtTok(s.ctx)} tokens is under the ${fmtTok(BIG_TOKENS)} minimum, so it would go straight through.`
+  if (!s.coldCompact) return `the coldCompact option is off, so it would go straight through and re-write ${fmtTok(s.ctx)} tokens for ${fmtUsd(coldUsd(s))}.`
+  if (s.running) return `a turn is running, so it would go out cold, re-writing ${fmtTok(s.ctx)} tokens for ${fmtUsd(coldUsd(s))}.`
+  return `it would compact ${fmtTok(s.ctx)} tokens first, then send the message. With an image or an @file mention it would go out cold, for ${fmtUsd(coldUsd(s))}.`
 }
 
 export function receiptText(r: Receipt): string {
@@ -1135,7 +1160,7 @@ export const register: Register = (on, options) => {
           Text({ wrap: 'truncate-end', children: [
             Text({ color: noColor ? undefined : 'claude', bold: true, children: ['CACHE WATCH'] }),
             Text({ dimColor: true, children: [' · '] }),
-            Text({ bold: true, children: ['Resuming a cold chat'] }),
+            Text({ bold: true, children: [note.isPreview ? 'Resuming a cold chat (preview)' : 'Resuming a cold chat'] }),
             Text({ dimColor: true, children: [coldFor] }),
           ] }),
           stats,
@@ -1149,7 +1174,10 @@ export const register: Register = (on, options) => {
       )
     }
     const text = rowText(s, now)
-    if (!text || (s.deadline && now >= s.deadline)) return notice.length ? $.ui.resolve(e).Box({ flexDirection: 'column', children: [rest, ...notice] }) : rest
+    const noRow = !text || (s.deadline && now >= s.deadline)
+    const paid = await read($, receipt)
+    const noPill = !paid || now - paid.at >= RECEIPT_MS
+    if (noRow && noPill) return notice.length ? $.ui.resolve(e).Box({ flexDirection: 'column', children: [rest, ...notice] }) : rest
     const state = s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
     const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined
     const { Box, Text } = $.ui.resolve(e)
@@ -1166,12 +1194,11 @@ export const register: Register = (on, options) => {
         'cache-watch',
         dot(),
         Text({ color, bold: true, children: [state] }),
-        ...text.split(' · ').flatMap(part => [dot(), part]),
+        ...(text ?? '').split(' · ').flatMap(part => [dot(), part]),
       ] }),
     ] })
-    const rows = footer === 'on' && footerSeen.surface === e.surface ? [] : [row]
-    const paid = await read($, receipt)
-    if (!paid || now - paid.at >= RECEIPT_MS) return rows.length || notice.length ? Box({ flexDirection: 'column', children: [rest, ...notice, ...rows] }) : rest
+    const rows = noRow || (footer === 'on' && footerSeen.surface === e.surface) ? [] : [row]
+    if (noPill) return rows.length || notice.length ? Box({ flexDirection: 'column', children: [rest, ...notice, ...rows] }) : rest
     // The paid write as a pill under the row: what the log line said, drawn where it can be styled.
     const shield = e.surface === 'desktop' ? $.ui.resolve(e).Svg({ source: shieldSvg(light), width: 16, height: 16, alt: 'Paid' })
       : Text({ color: noColor ? undefined : 'success', children: ['✓'] })
@@ -1253,7 +1280,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'cache-watch',
       description: 'Prompt cache state, cold price and this session\'s cold writes; guard warn|refuse (cache-watch, the Mod)',
-      argumentHint: '[status | preview | pay | compact | fresh | dismiss | guard warn | guard refuse | footer on|off]',
+      argumentHint: '[status | preview [hold|resume|receipt|compacted] | dry-run | pay | compact | fresh | dismiss | guard warn | guard refuse | footer on|off]',
       immediate: true,
     })
     // The hook form of cache-tax ships a /cache-tax:status skill; both installed means two guards.
@@ -1375,10 +1402,25 @@ export const register: Register = (on, options) => {
       if (!s.hasBand) return { text: 'cache-watch: this surface draws no band, so there is no card to preview' }
       // Right after a reload no turn has named the model yet; the session knows it.
       if (!s.lastModel) s.lastModel = await $.session.model()
-      await update($, held, () => ({ ...heldFrom(s, 'Where were we? Give me a 2 line recap.'), isPreview: true }))
+      const shown = previewState(s)
+      if (words[1] === 'resume') {
+        await update($, resumed, () => ({ ...resumeNoteFrom(shown, undefined), isPreview: true }))
+        return { text: 'cache-watch: the resume card is above the prompt box. Nothing is cleared or compacted: any button closes it.' }
+      }
+      if (words[1] === 'receipt' || words[1] === 'compacted') {
+        const compacted = words[1] === 'compacted'
+        const tokens = compacted ? Math.round(shown.ctx / 8) : shown.ctx
+        const preview = compacted ? `Preview: compacted from ${fmtTok(shown.ctx)} tokens first, because it came from a remote session.` : 'Preview: nothing was paid.'
+        const paid: Receipt = { tokens, usd: previewUsd(shown, tokens), at: now, warmForMs: compacted ? 0 : holdMs(s, now), note: preview }
+        await update($, receipt, () => paid)
+        return { text: 'cache-watch: the receipt is above the prompt box until your next message.' }
+      }
+      if (words[1] && words[1] !== 'hold') return { text: 'cache-watch: preview takes hold, resume, receipt or compacted' }
+      await update($, held, () => ({ ...heldFrom(shown, 'Where were we? Give me a 2 line recap.'), isPreview: true }))
       await update($, showStatus, () => false)
       return { text: 'cache-watch: the hold card is above the prompt box, with this session\'s numbers. Any button closes it.' }
     }
+    if (words[0] === 'dry-run') return { text: `cache-watch: ${remoteDryRun(s, now)} Nothing was sent or compacted.` }
     if (words[0] === 'footer') {
       const seen = footerSeen.count
         ? `The footer has drawn ${footerSeen.count} times, last on ${footerSeen.surface}.`
