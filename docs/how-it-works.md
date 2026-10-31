@@ -16,7 +16,7 @@ That's the screenshot in the README: a 442,614-token conversation, cold for almo
 
 cache-watch doesn't ask Anthropic whether the cache is alive. It keeps its own clock: it notes the moment each of your requests goes out, and counts the cache's lifetime, usually an hour, from the last one. That's why the footer can say `cache warm · 54m left` and count down.
 
-It's an estimate, and a good one, but some things can break a cache before the hour is up. Anything that changes the start of the conversation is another, because the cache only matches an identical beginning. After a compaction the clock resets and the footer drops the warm or cold state until your next turn, because the old cache no longer matches.
+It's an estimate, and a good one, but some things can break a cache before the hour is up. A model switch is seen and stops the clock until the next turn. Anything that changes the start of the conversation is one, because the cache only matches an identical beginning. After a compaction the clock resets and the footer drops the warm or cold state until your next turn, because the old cache no longer matches.
 
 ## The resume card
 
