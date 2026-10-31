@@ -30,9 +30,12 @@ After a cold write is paid, a receipt says what it cost, and keepwarm holds the 
 - **Hold card.** When the cache has gone cold and the conversation is big (50,000 tokens or more), your next message waits on a card above the prompt box. This is for a chat that went cold while you weren't looking, such as one left open over lunch. After a resume card your first message goes straight through, because you've already seen the price. The card puts what sending now costs next to what a warm turn would have cost. Then you pick:
   - **Pay and send** sends it as it is. cache-watch then keeps the cache warm for 3 hours, so you don't pay the re-write twice.
   - **Start fresh** runs `/clear` and puts your message back in the prompt box for a new conversation. `/resume` still brings the old one back.
+  - **Compact and send**, with the `coldCompact` option, compacts first, so the write is small.
   - **Show cache status** opens the status card inside the hold card.
+  - **Close** puts your message back in the prompt box, unsent.
+- **Remote sends.** A phone can't press a card. With `coldCompact`, a cold message from Remote Control or the Telegram relay compacts the conversation first and goes out on its own.
 - **Resume card.** Open an old chat whose cache has gone cold and a card above the prompt box says what your first message will cost, with a **Start fresh** button for when the price isn't worth it. It goes when you send, start fresh or dismiss it, and your first message isn't held.
-- **Keepwarm.** `/keepwarm` keeps the cache warm for 6 hours, with a cheap ping 55 minutes after your last request. [How it works](docs/how-it-works.md) explains what a ping is and what it costs.
+- **Keepwarm.** `/keepwarm` keeps the cache warm for 6 hours, or the `windowMinutes` option, with a cheap ping 55 minutes after your last request. [How it works](docs/how-it-works.md) explains what a ping is and what it costs.
 
 The only request cache-watch makes of its own is the keepwarm ping: a one-line question over your conversation, whose reply is thrown away and never shows in the chat. It keeps a few settings in Claude Code's plugin store on your machine, listed in [the reference](docs/commands.md#what-it-stores).
 
@@ -120,13 +123,15 @@ The buttons have command twins on purpose. In the desktop app a click can get lo
 
 ## What's different from cache-tax
 
-- **The hold card.** cache-tax drops a cold send once and shows the price as text, and you send again to pay. cache-watch holds it on a card with the price drawn and three choices. Sending the same message again still pays, as before.
+- **The hold card.** cache-tax drops a cold send once and shows the price as text, and you send again to pay. cache-watch holds it on a card with the price drawn and buttons to choose from. Sending the same message again still pays, as before.
 - **It draws in the desktop app.** cache-tax decides when the session starts whether it can draw above the prompt. In the desktop app the Code tab connects a moment later, so cache-tax never draws its band there. cache-watch checks each time it draws.
 - **The footer.** The status lives in the prompt footer and shows all the time, not only while keepwarm runs.
 - **55-minute pings** instead of 50. That saves one ping in a 6-hour window and still leaves 5 minutes of slack before the hour runs out. [Why 55](docs/how-it-works.md#why-55-minutes).
 - **`/cache-watch`** instead of `/cache-tax`.
+- **Compacting a cold send,** from the card or on its own for a remote session.
+- **Options** for the window and a daily cutoff, a cache lifetime read from Claude Code's rules, and a state that outlives a reload of the mod.
 
-Everything else is cache-tax's: the guard's logic, keepwarm, the cost maths and the price table.
+The guard's logic, keepwarm, the cost maths and the price table are cache-tax's.
 
 ## Options
 

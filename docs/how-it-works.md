@@ -14,9 +14,9 @@ That's the screenshot in the README: a 442,614-token conversation, cold for almo
 
 ## What cache-watch watches
 
-cache-watch doesn't ask Anthropic whether the cache is alive. It keeps its own clock: it notes the moment each of your requests goes out, and counts an hour from the last one. That's why the footer can say `cache warm · 54m left` and count down.
+cache-watch doesn't ask Anthropic whether the cache is alive. It keeps its own clock: it notes the moment each of your requests goes out, and counts the cache's lifetime, usually an hour, from the last one. That's why the footer can say `cache warm · 54m left` and count down.
 
-It's an estimate, and a good one, but some things can break a cache before the hour is up. Changing the model is one. Anything that changes the start of the conversation is another, because the cache only matches an identical beginning. After a compaction the clock resets and the footer drops the warm or cold state until your next turn, because the old cache no longer matches.
+It's an estimate, and a good one, but some things can break a cache before the hour is up. Anything that changes the start of the conversation is another, because the cache only matches an identical beginning. After a compaction the clock resets and the footer drops the warm or cold state until your next turn, because the old cache no longer matches.
 
 ## The resume card
 
@@ -36,7 +36,9 @@ From the card:
 
 - **Pay and send** sends the message as your own words. The cold write gets scored, and keepwarm then holds the cache for 3 hours, because once you've paid for a write it would be a shame to pay for another one an hour later. A pill above the prompt box says what the write cost. It goes at your next message, or after 15 minutes.
 - **Start fresh** runs `/clear` and puts your message back in the prompt box. Starting a new conversation, perhaps with a short note about where you were, often costs less than rebuilding a huge old one. `/resume` still gets the old conversation back.
+- **Compact and send**, with the `coldCompact` option, runs `/compact` and then sends the message, so the first write is the small conversation. It only pays where compaction is cheap on a cold cache, as JetCompact's is.
 - **Show cache status** opens the status card inside the hold card, without adding anything to the conversation.
+- **Close** closes the card and puts your message back in the prompt box, unsent. Sent from there, it meets the card again.
 
 Sending again also pays, whether it's the same message or a different one. The hold happens once per cold spell, never twice.
 
@@ -56,6 +58,8 @@ Keepwarm keeps the cache from expiring while you're away, by using it before the
 A **ping** is a tiny side request. Claude Code sends your whole conversation plus one extra line, "Reply with the single word: warm". The conversation matches the cache, so the API reads it from cache, which is cheap and resets the hour. The reply is thrown away. It never shows in your chat and never becomes part of the conversation.
 
 cache-watch sends a ping 55 minutes after your last request, and again 55 minutes after each ping, until the window ends. Each ping's usage gets checked. If a ping reads nothing from the cache, or writes a tenth or more of what it read, the cache was already gone, so keepwarm stops and says why. It also stops on an API error or an interrupted ping. It doesn't retry, because a retry against a dead cache would be the expensive write you were trying to avoid.
+
+A ping refused by a busy API is tried again while it can still land a minute before the cache goes cold. With `always`, each turn moves the window to the default length after that turn, so a long session never outlives it. With a `cutoffTime`, no automatic window lasts past that time of day; a window you ask for with `/keepwarm` is not cut. On a five-minute cache no ping is sent: it could not arrive in time, and a ping on a cold cache pays the whole write.
 
 A window belongs to one session. Resume that session and the window is still there. If the cache is already cold when you arm keepwarm, the first ping waits until after your next turn, because pinging a cold cache is a full write.
 
@@ -85,11 +89,11 @@ Take the conversation from the screenshot: 442k tokens on Opus, $0.22 a ping, $4
 
 So size the window to when you expect to be back. The status card shows the break-even for your model: how many pings cost the same as one cold write, and how much idle time that covers at the current gap. On Opus that's 20 pings, about 18 hours.
 
-That's why plain `/keepwarm` gives you 6 hours, why a paid cold write arms only 3, and why `/keepwarm always` is opt-in.
+That's why plain `/keepwarm` gives you 6 hours unless `windowMinutes` says otherwise, why a paid cold write arms only 3, and why `/keepwarm always` is opt-in.
 
 ## Subscriptions and dollars
 
-The dollar figures are API list prices from September 2026, kept in one table at the top of `hooks/register.ts`. On an API key they're your bill.
+The dollar figures are API list prices from October 2026, kept in one table at the top of `hooks/register.ts`. On an API key they're your bill.
 
 On a Claude subscription they're a yardstick, not a bill. What you spend there is your usage allowance, the 5-hour and weekly limits. How heavily a cache read counts against those limits isn't documented anywhere we could find, so the trade-off on a subscription could be better or worse than the dollar maths says. Keep an eye on your usage during the first few windows.
 

@@ -45,7 +45,7 @@ The reason shows in `/keepwarm status` and on the `/cache-watch` card.
 | `/cache-watch footer off` | Shows the status as a row above the prompt box instead. |
 | `/cache-watch footer` | Says which is set, and whether the footer has drawn yet in this session. |
 
-The `pay` and `fresh` commands do what the buttons do because a click in the desktop app can get lost while any mod redraws ([anthropics/claude-code#99211](https://github.com/anthropics/claude-code/issues/99211)). The first click on the band can also only move focus there. The commands always land.
+The `pay`, `compact`, `fresh` and `close` commands do what the buttons do because a click in the desktop app can get lost while any mod redraws ([anthropics/claude-code#99211](https://github.com/anthropics/claude-code/issues/99211)). The first click on the band can also only move focus there. The commands always land.
 
 ### The status card
 
@@ -53,6 +53,7 @@ The `pay` and `fresh` commands do what the buttons do because a click in the des
 |---|---|
 | (first line) | The model the last turn used. |
 | `state` | `warm, 54m left`, `COLD, last request 6h12m ago`, `no request yet this session`, or `reset by compaction`. |
+| `lifetime` | The cache's lifetime, five minutes or an hour, and what chose it. |
 | `context` | The conversation's size in tokens: what a cold send would re-write. |
 | `cold cost` | The re-write at the cache-write rate, and a warm turn at the read rate. |
 | `keepwarm` | The window's time left and next ping, `stopped` with the reason, or `off`. |
@@ -83,7 +84,7 @@ The status row above the prompt box, used when the footer is off or hasn't drawn
 | Send it now | The re-write price, its token count and the cache-write rate. |
 | A warm turn | What the same turn would have cost with the cache warm. |
 | On hold | Your message, cut at 160 characters. |
-| Buttons | **Pay and send**, **Start fresh**, **Show cache status**. |
+| Buttons | **Pay and send**, **Compact and send** (with the `coldCompact` option), **Start fresh**, **Show cache status**, **Close**. |
 
 When the band above the prompt has fewer rows than the full card needs (24 in the desktop app, 18 in a terminal), the card turns compact: a one-line header and thin bars, with the buttons still in view.
 
@@ -97,13 +98,13 @@ Opening an old chat whose cache Claude Code reports as likely expired, with 50,0
 | Send it now | What your first message will cost to re-write the cache. This is Claude Code's own estimate when the resume carries one, and the rate shown is worked out from it. |
 | A warm turn | What the same turn would cost with the cache warm. |
 | Tip | "A cold cache means the AI has to re-read everything in the session all over again. If the juice isn't worth the squeeze, consider starting a fresh chat." |
-| Buttons | **Start fresh** runs `/clear`. **Dismiss** closes the card. |
+| Buttons | **Compact** compacts the conversation, with the `coldCompact` option. **Start fresh** runs `/clear`. **Dismiss** closes the card. |
 
 The card goes when you send a message, run `/clear`, or press either button. Your first message after it goes straight through, never held, because the card already showed you the price. The same goes for the plain line. Where no band draws, such as the VS Code panel, cache-watch logs a one-line version in the chat instead, 3 seconds after the session resumes.
 
 ## The receipt pill
 
-After a paid cold write, a receipt pill above the prompt box says what the write cost and how long keepwarm now holds the cache. It goes at your next message, or after 15 minutes.
+After a paid cold write, a receipt pill above the prompt box says what the write cost and how long keepwarm now holds the cache. After a send that compacted first, it says what the smaller write cost and from what size the conversation was compacted. It goes at your next message, or after 15 minutes.
 
 ## Settings and environment
 
@@ -129,28 +130,30 @@ cache-watch keeps these in Claude Code's plugin store, on your machine:
 |---|---|---|
 | `deadline:<session id>` | When this session's keepwarm window ends | The window ends or stops |
 | `every:<session id>` | A custom ping gap, only when you set one | The window ends or stops |
-| `always` | Whether `/keepwarm always` is on | `/keepwarm off` |
+| `always` | Whether `/keepwarm always` is on; with the `always` option, also a `false` from `/keepwarm off` | `/keepwarm off`, or for good with the option |
+| `queued:<session id>` | Messages dropped for a compaction and not yet sent again | They are sent |
 | `guard` | `refuse` or `warn` | You change it |
 | `footer` | `on` or `off` | You change it |
 
 A session you never come back to leaves its two keepwarm keys behind, because cache-watch only cleans up the current session's keys. They're a few bytes each.
 
-The held message and the session's cold-write tally live in memory for the session only. Nothing else is written anywhere.
+The held message, the cache clock and the session's cold-write tally live in Claude Code's state for the running session, so they outlive a reload of the mod and go with the process. Nothing else is written anywhere.
 
 ## What it can reach
 
-From `claude plugin validate` on Claude Code 2.1.295:
+From `claude plugin validate` on Claude Code 2.1.314:
 
 ```
-hooks: config.set{key=theme}, ui.render{component=AbovePrompt}, ui.render{component=SessionMode}, session.attach, session.start, classic.SessionStart, command.run{command=keepwarm}, command.run{command=cache-watch}, prompt.submit, turn.step, turn.complete, session.compact
-calls: $.clock.after, $.clock.now, $.command.list, $.command.register, $.command.run (via startFresh), $.config.list, $.env.get, $.model.fork (via ping), $.prompt.fill (via startFresh), $.prompt.submit (via payAndSend), $.session.id, $.session.model, $.session.surfaces (via hasBandSurface), $.session.usage, $.state.get, $.state.set, $.store.delete (via prune, startWindow, stop), $.store.get, $.store.set, $.ui.invalidate, $.ui.log, $.ui.resolve, $.ui.status, $.ui.toast (via startFresh)
-env reads: NO_COLOR
+hooks: config.set{key=theme}, ui.render{component=AbovePrompt}, ui.render{component=SessionMode}, session.attach, session.start, session.end, classic.SessionStart, command.run{command=keepwarm}, command.run{command=cache-watch}, prompt.submit, turn.step, turn.complete, session.compact, classic.PostModelSwitch
+calls: $.clock.after, $.clock.now, $.command.list, $.command.register, $.command.run (via compactNow, freshFromResume, startFresh), $.config.list, $.env.get, $.model.fork (via ping), $.prompt.fill (via closeCard, startFresh), $.prompt.submit (via compactThenSend, payAndSend), $.session.compact (via compactNow), $.session.id, $.session.model, $.session.surfaces (via hasBandSurface), $.session.usage, $.settings.read (via readTtl), $.state.get, $.state.set, $.store.delete (via compactThenSend, endConversation, prune, reseat, startWindow, stop), $.store.get, $.store.set, $.ui.invalidate, $.ui.log, $.ui.resolve, $.ui.status, $.ui.toast (via compactFromResume, freshFromResume, startFresh)
+env reads: ANTHROPIC_API_KEY, CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL, CLAUDE_CODE_PROMPT_CACHE_TTL, CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_FOUNDRY, CLAUDE_CODE_USE_VERTEX, ENABLE_PROMPT_CACHING_1H, FORCE_PROMPT_CACHING_5M, NO_COLOR
 ```
 
 In plain words:
 
-- **It reads every prompt you send.** It checks whether a message starts with `/`, whether it carries attachments or an `@file` mention, and, only when holding it, keeps the text so Pay and send can resend it.
+- **It reads every prompt you send.** It checks whether a message starts with `/`, whether it carries attachments or an `@file` mention, and, only when holding it or compacting first, keeps the text so it can be sent again. That text is stored while a compaction runs.
+- **It reads the settings and environment that set the cache's lifetime.** `ANTHROPIC_API_KEY` and the provider switches count only as set or not: an API key means five minutes. Their values go nowhere.
 - **It reads timing and usage.** That's when each request goes out, plus the token counts and model Claude Code already has for each turn and each ping.
 - **It sends one kind of request of its own:** the keepwarm ping, with a fixed one-line prompt, only inside a keepwarm window. That's a window you armed, or the 3 hours it arms itself after you pay a cold write.
-- **It sends your held message** when you press Pay and send, and runs `/clear` when you press Start fresh.
+- **It sends your held message** when you press Pay and send or Compact and send, runs `/clear` when you press Start fresh, and runs `/compact` for the Compact buttons and, with the `coldCompact` option, for a cold message from a remote session.
 - **It has no file, network or process access.** `$.fs`, `$.http` and `$.process` aren't in its calls.
