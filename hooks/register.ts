@@ -106,6 +106,8 @@ export type State = {
   compactedFrom: number
   /** Compactions seen: a turn clears `compacted`, so only a count says one happened. */
   compactions: number
+  /** A main turn is under way: `turnId` does not say so for a plugin's prompt, and compaction refuses then. */
+  running: boolean
 }
 
 /** What this turn's main requests wrote before any compaction it saw, priced per request where the steps reported usage. */
@@ -454,7 +456,7 @@ async function stop($: EngineInterface, s: State, why: string | null, forgetAlwa
 async function endConversation($: EngineInterface, s: State, reason: 'clear' | 'resume') {
   // Claimed before any await: a second end or a classic start for the same conversation finds it already gone, and an
   // end cut short by its budget leaves no timer and no old id behind, only the keys below.
-  const keys = [deadlineKey(s), everyKey(s)]
+  const keys = [deadlineKey(s), everyKey(s), queueKey(s)]
   const ending = s.sid
   resetForClear(s)
   s.sid = ''
@@ -492,6 +494,9 @@ async function reseat($: EngineInterface, s: State) {
   // seated under the old id, and a window opened meanwhile waits in memory for the id it belongs to.
   if (id === s.endingSid) return
   const now = await seat($, s, id)
+  // Messages waiting on a compaction follow the person into this conversation; any queued here wait no longer.
+  if (s.compacting) await $.store.set(queueKey(s), s.compacting)
+  else await sendQueued($, s)
   if (s.always) await armAlways($, s, now)
   // A window carried over, or armed while the conversation was ending, is written under this id.
   else if (s.deadline) await startWindow($, s, s.deadline - now, s.every)
@@ -893,9 +898,10 @@ async function compactThenSend($: EngineInterface, s: State, why: string) {
   const before = s.ctx
   const key = queueKey(s)
   const compacted = await compactNow($, s)
-  const texts = s.compacting ?? []
+  let texts = s.compacting ?? []
   s.compacting = null
-  if (queueKey(s) === key) {
+  const owner = queueKey(s)
+  if (owner === key) {
     s.ackedAt = 0
     if (compacted) {
       s.compactedFrom = before
@@ -906,9 +912,23 @@ async function compactThenSend($: EngineInterface, s: State, why: string) {
     }
     $.ui.log(compacted ? `compacted from ${fmtTok(before)} tokens before sending, ${why}.` : 'the compaction did not go through, so the message may have gone out cold.')
   }
-  for (const text of texts) await $.prompt.submit({ text, asUser: true })
+  // Each leaves the queue before it goes, so a reload here sends none twice.
+  while (texts.length) {
+    const [text, ...rest] = texts as [string, ...string[]]
+    texts = rest
+    await $.store.set(owner, rest)
+    await $.prompt.submit({ text, asUser: true })
+  }
+  await $.store.delete(owner)
   await $.store.delete(key)
-  await $.store.delete(queueKey(s))
+}
+
+/** Sends what a reload or a restart caught between a message's drop and its resend, once the session is in that conversation. */
+async function sendQueued($: EngineInterface, s: State) {
+  const queued = await $.store.get(queueKey(s))
+  if (s.compacting || !Array.isArray(queued) || !queued.length) return
+  s.compacting = queued.filter(text => typeof text === 'string')
+  $.clock.after(0, () => { void compactThenSend($, s, 'because a message was waiting for it') })
 }
 
 async function compactAndSend($: EngineInterface, s: State) {
@@ -949,7 +969,7 @@ export function freshState(): State {
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null, note: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '',
-    ttlMs: TTL_1H_MS, ttlSource: 'not read yet', windowMs: DEFAULT_WINDOW_MS, alwaysOption: false, cutoffMinutes: null, coldCompact: false, compacting: null, compactedFrom: 0, compactions: 0,
+    ttlMs: TTL_1H_MS, ttlSource: 'not read yet', windowMs: DEFAULT_WINDOW_MS, alwaysOption: false, cutoffMinutes: null, coldCompact: false, compacting: null, compactedFrom: 0, compactions: 0, running: false,
   }
 }
 
@@ -1218,12 +1238,7 @@ export const register: Register = (on, options) => {
     if (s.always) await armAlways($, s, now)
     // The classic start arms a restored window too, but a managed plugin above this tier may continue beneath it; arming twice leaves one timer.
     else if (s.deadline) await arm($, s)
-    // Messages a reload or a restart caught between their drop and their resend.
-    const queued = await $.store.get(queueKey(s))
-    if (Array.isArray(queued) && queued.length) {
-      s.compacting = queued.filter(text => typeof text === 'string')
-      $.clock.after(0, () => { void compactThenSend($, s, 'because a message was waiting for it') })
-    }
+    await sendQueued($, s)
     await $.command.register({
       name: 'keepwarm',
       description: `Keep the prompt cache warm: bare for ${fmtDuration(s.windowMs)}, a window such as 90m, always, off, or status (cache-watch)`,
@@ -1407,7 +1422,7 @@ export const register: Register = (on, options) => {
     }
     if (!isCold(s, now) || s.ctx < BIG_TOKENS) return next(e)
     // Nobody at a phone can choose on a card, so the cheap way out is taken for them. Only a timer can compact, and only between turns.
-    if (s.coldCompact && isRemote(e.origin) && canHold(e.text, e.attachments) && !e.turnId && !s.compacting) {
+    if (s.coldCompact && isRemote(e.origin) && canHold(e.text, e.attachments) && !s.running && !s.compacting) {
       await enqueue($, s, e.text)
       $.clock.after(0, () => { void compactThenSend($, s, 'because it came from a remote session') })
       return { drop: COMPACTING_DROP }
@@ -1454,6 +1469,7 @@ export const register: Register = (on, options) => {
   on('turn.step', async function* ($, e, next) {
     if (!e.agentId) {
       await reseat($, s)
+      s.running = true
       // The off count when the turn's first request went out: an off after it wins over what the turn opens.
       if (e.index === 0) s.turnOffs = s.offs
       // A compaction leaves a summary where tens of messages were; a rewind takes a few off. A request over fewer than half the
@@ -1479,6 +1495,7 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     if (e.agentId) return r
+    s.running = false
     // A main-thread turn warmed the cache, so nothing is held any more.
     await release($)
     // An off at any point in this turn wins over every window the turn would open; a host that raised no

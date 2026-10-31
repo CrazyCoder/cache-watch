@@ -3122,7 +3122,55 @@ describe('messages on their way past a compaction', () => {
     const clock = mock.clock(on, { now: START })
     world(on, [])
     await start($, clock)
-    expect((await $.prompt.submit({ text: 'hi', wait: false, turnId: 't', origin: { kind: 'bridge' } })).drop).toBe(undefined)
+    const r = $.turn.step({ turnId: 't', index: 0, model: 'm', messageCount: 5 } as never)
+    for await (const piece of r as AsyncIterable<unknown>) void piece
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'plugin', name: 'cc-relay' } })).drop).toBe(undefined)
+  })
+
+  test('messages leave the queue one at a time, so none goes twice', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const writes: unknown[] = []
+    class Spy extends Map<string, unknown> {
+      override set(key: string, value: unknown) {
+        writes.push([value, w.entered.length])
+        return super.set(key, value)
+      }
+    }
+    const store = new Spy()
+    const w = world(on, [], { store })
+    Map.prototype.set.call(store, 'queued:S1', ['a', 'b'])
+    await $.session.start(session)
+    await clock.advance(1)
+    expect(w.entered).toEqual(['a', 'b'])
+    expect(writes).toEqual([[['b'], 0], [[], 1]])
+    expect(store.has('queued:S1')).toBe(false)
+  })
+
+  test('a queue follows a /clear to the new conversation, so a reload there still finds it', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    let sid = 'S1'
+    world(on, [], { sid: () => sid, compact: hung, store })
+    on('command.run', { command: 'compact' }, () => new Promise<{ text: string }>(() => {}))
+    await start($, clock)
+    await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'bridge' } })
+    await clock.advance(1)
+    sid = 'S2'
+    await $.classic.SessionStart({ session_id: 'S2', source: 'clear' })
+    expect(store.get('queued:S2')).toEqual(['hi'])
+    expect(store.has('queued:S1')).toBe(false)
+  })
+
+  test('a queue is sent when /resume reaches its conversation in a running process', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let sid = 'S1'
+    const w = world(on, [], { sid: () => sid, store: new Map<string, unknown>([['queued:S2', ['waiting']]]) })
+    await $.session.start(session)
+    sid = 'S2'
+    await $.classic.SessionStart({ session_id: 'S2', source: 'resume' })
+    await clock.advance(1)
+    expect(w.entered).toEqual(['waiting'])
   })
 
   test('a message queued before a /clear still goes out, and its receipt notes stay behind', { options: { coldCompact: true } }, async ($, on) => {
