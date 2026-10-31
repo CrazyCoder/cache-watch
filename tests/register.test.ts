@@ -2814,19 +2814,18 @@ describe('a reload of the mod', () => {
 })
 
 describe('the cache lifetime', () => {
-  const base = { force5m: false, enable1h: false, overLimit: false }
+  const base = { force5m: false, enable1h: false, overLimit: false, thirdParty: false }
   test('follows the order of choice', () => {
-    expect(resolveTtl({ ...base, login: 'claude.ai' }).ms).toBe(HOUR)
     expect(resolveTtl({ ...base }).ms).toBe(HOUR)
-    expect(resolveTtl({ ...base, login: 'claude.ai', overLimit: true }).ms).toBe(5 * MIN)
-    expect(resolveTtl({ ...base, login: 'api-key' }).ms).toBe(5 * MIN)
-    expect(resolveTtl({ ...base, login: 'api-key', setting: '1h' }).ms).toBe(HOUR)
-    expect(resolveTtl({ ...base, login: 'api-key', setting: '6h' }).ms).toBe(5 * MIN)
-    expect(resolveTtl({ ...base, login: 'claude.ai', setting: '5m' }).ms).toBe(5 * MIN)
-    expect(resolveTtl({ ...base, login: 'api-key', enable1h: true }).ms).toBe(HOUR)
+    expect(resolveTtl({ ...base, overLimit: true }).ms).toBe(5 * MIN)
+    expect(resolveTtl({ ...base, thirdParty: true }).ms).toBe(5 * MIN)
+    expect(resolveTtl({ ...base, thirdParty: true, setting: '1h' }).ms).toBe(HOUR)
+    expect(resolveTtl({ ...base, thirdParty: true, setting: '6h' }).ms).toBe(5 * MIN)
+    expect(resolveTtl({ ...base, setting: '5m' }).ms).toBe(5 * MIN)
+    expect(resolveTtl({ ...base, thirdParty: true, enable1h: true }).ms).toBe(HOUR)
     expect(resolveTtl({ ...base, setting: '1h', ttlEnv: '5m' }).ms).toBe(5 * MIN)
     expect(resolveTtl({ ...base, setting: '1h', force5m: true }).ms).toBe(5 * MIN)
-    expect(resolveTtl({ ...base, login: 'claude.ai', messagesTtl: '5m' }).ms).toBe(5 * MIN)
+    expect(resolveTtl({ ...base, messagesTtl: '5m' }).ms).toBe(5 * MIN)
   })
 
   test('a five-minute cache counts down five minutes and gets no ping', async ($, on) => {
@@ -2853,14 +2852,14 @@ describe('the cache lifetime', () => {
     expect(w.forks.length).toBe(0)
   })
 
-  test('a model switch that left the new model cold stops the clock and the pings until a turn', async ($, on) => {
+  test('a model switch stops the clock and the pings until a turn, since the new model has no cache of its own', async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [warm])
     on('classic.PostModelSwitch', () => ({}))
     await $.session.start(session)
     await $.turn.complete(turn())
     await $.command.run(run('keepwarm', '3h'))
-    await $.classic.PostModelSwitch({ from_model: 'a', to_model: 'claude-opus-5-5', context_tokens: 1000, prompt_cache_warm: false, cache_ttl: '1h', estimated_cache_write_usd: 1, pricing: 'catalog' } as never)
+    await $.classic.PostModelSwitch({ from_model: 'a', to_model: 'claude-opus-5-5', context_tokens: 1000, prompt_cache_warm: true, cache_ttl: '1h', estimated_cache_write_usd: 1, pricing: 'catalog' } as never)
     await clock.advance(56 * MIN)
     expect(w.forks.length).toBe(0)
     await $.turn.complete(turn())
@@ -2979,7 +2978,7 @@ describe('compacting a cold send', () => {
     await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'bridge' } })
     await clock.advance(1)
     expect(w.entered).toEqual(['hi'])
-    expect(w.logs.at(-1)).toMatch(/the compaction was refused/)
+    expect(w.logs.at(-1)).toMatch(/the compaction did not go through/)
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
     expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/session     1 cold write paid/)
   })
@@ -3077,6 +3076,77 @@ describe('a compaction that never answers', () => {
     expect(w.entered).toEqual([])
     await clock.advance(COMPACT_WAIT_MS)
     expect(w.entered).toEqual(['hi'])
-    expect(w.logs.at(-1)).toBe('the compaction was refused, so the message went out cold.')
+    expect(w.logs.at(-1)).toBe('the compaction did not go through, so the message may have gone out cold.')
+  })
+})
+
+describe('messages on their way past a compaction', () => {
+  const start = async ($: Parameters<TestBody>[0], clock: { advance(ms: number): Promise<unknown> }) => {
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+  }
+  const hung = () => { throw new Error('headless') }
+
+  test('a message dropped for a compaction is stored until it is resent', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    const w = world(on, [], { store })
+    await start($, clock)
+    await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'bridge' } })
+    expect(store.get('queued:S1')).toEqual(['hi'])
+    await clock.advance(1)
+    expect(w.entered).toEqual(['hi'])
+    expect(store.get('queued:S1')).toBe(undefined)
+  })
+
+  test('a start finds what a reload caught and sends it', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { store: new Map<string, unknown>([['queued:S1', ['lost in the reload']]]) })
+    await $.session.start(session)
+    await clock.advance(1)
+    expect(w.entered).toEqual(['lost in the reload'])
+  })
+
+  test('a message with an attachment that arrives during a compaction is not queued, since a resend would lose it', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [], { compact: hung })
+    on('command.run', { command: 'compact' }, () => new Promise<{ text: string }>(() => {}))
+    await start($, clock)
+    await $.prompt.submit({ text: 'first', wait: false, origin: { kind: 'bridge' } })
+    await clock.advance(1)
+    expect((await $.prompt.submit({ text: 'look', wait: false, origin: { kind: 'bridge' }, attachments: [{ type: 'image' }] })).drop).toBe(undefined)
+  })
+
+  test('a remote message into a running turn does not compact under it', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [])
+    await start($, clock)
+    expect((await $.prompt.submit({ text: 'hi', wait: false, turnId: 't', origin: { kind: 'bridge' } })).drop).toBe(undefined)
+  })
+
+  test('a message queued before a /clear still goes out, and its receipt notes stay behind', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let open = () => {}
+    const gate = new Promise<void>(r => { open = r })
+    let sid = 'S1'
+    const w = world(on, [], { sid: () => sid, compact: hung, store: new Map<string, unknown>() })
+    on('command.run', { command: 'compact' }, async () => { await gate; return { text: '' } })
+    await start($, clock)
+    await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'bridge' } })
+    await clock.advance(1)
+    sid = 'S2'
+    await $.classic.SessionStart({ session_id: 'S2', source: 'clear' })
+    open()
+    await clock.advance(1)
+    expect(w.entered).toEqual(['hi'])
+    expect(w.logs.some(line => /compaction did not go through/.test(line))).toBe(false)
+  })
+
+  test('the lifetime goes to five minutes under an API key', async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [], { env: { ANTHROPIC_API_KEY: 'test' } })
+    await $.session.start(session)
+    expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/lifetime    5m/)
   })
 })

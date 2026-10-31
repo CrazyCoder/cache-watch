@@ -23,6 +23,7 @@ const KEY_ALWAYS = 'always'
 const KEY_FOOTER = 'footer'
 /** The relay's prompts reach the session as this plugin's, from a phone that shows no card. */
 const RELAY_PLUGIN = 'cc-relay'
+const KEY_QUEUED = 'queued'
 
 const LONG_PROMPT_TOKENS = 100000
 
@@ -129,20 +130,20 @@ export type TtlInputs = {
   setting?: unknown
   enable1h: boolean
   messagesTtl?: string
-  /** `$.session.identity().kind`; undefined when the host did not answer. */
-  login?: string
+  /** An API key or a cloud provider, not a subscription. `$.session.identity` answers managed mods only, so the environment says. */
+  thirdParty: boolean
   overLimit: boolean
 }
 
-/** Claude Code's order of choice; an unknown login stays at the hour a subscription gets. */
+/** Claude Code's order of choice. */
 export function resolveTtl(c: TtlInputs): { ms: number; source: string } {
   const pick = (): ['5m' | '1h', string] => {
     if (c.force5m) return ['5m', 'FORCE_PROMPT_CACHING_5M']
     if (c.ttlEnv === '5m' || c.ttlEnv === '1h') return [c.ttlEnv, 'CLAUDE_CODE_PROMPT_CACHE_TTL']
     if (c.setting === '5m' || c.setting === '1h') return [c.setting, 'promptCacheTtl setting']
     if (c.enable1h) return ['1h', 'ENABLE_PROMPT_CACHING_1H']
-    if (c.login === undefined || c.login === 'claude.ai') return c.overLimit ? ['5m', 'subscription past its limits'] : ['1h', 'subscription']
-    return ['5m', 'automatic']
+    if (c.thirdParty) return ['5m', 'automatic']
+    return c.overLimit ? ['5m', 'subscription past its limits'] : ['1h', 'subscription']
   }
   const [ttl, source] = pick()
   if (ttl === '1h' && c.messagesTtl === '5m') return { ms: TTL_5M_MS, source: `${source}, held by CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL` }
@@ -151,14 +152,17 @@ export function resolveTtl(c: TtlInputs): { ms: number; source: string } {
 
 /** Reads the session's cache lifetime. Past its limits a subscription drops to five minutes mid-session, so a ping reads it again. */
 async function readTtl($: EngineInterface, s: State) {
-  const [force5m, ttlEnv, messagesTtl, enable1h, settings, identity, usage] = await Promise.all([
+  const [force5m, ttlEnv, messagesTtl, enable1h, settings, usage, ...thirdParty] = await Promise.all([
     $.env.get('FORCE_PROMPT_CACHING_5M'),
     $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL'),
     $.env.get('CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL'),
     $.env.get('ENABLE_PROMPT_CACHING_1H'),
     $.settings.read().catch(() => null),
-    $.session.identity().catch(() => null),
     $.session.usage().catch(() => null),
+    $.env.get('ANTHROPIC_API_KEY'),
+    $.env.get('CLAUDE_CODE_USE_BEDROCK'),
+    $.env.get('CLAUDE_CODE_USE_VERTEX'),
+    $.env.get('CLAUDE_CODE_USE_FOUNDRY'),
   ])
   const ttl = resolveTtl({
     force5m: isTruthy(force5m),
@@ -166,7 +170,7 @@ async function readTtl($: EngineInterface, s: State) {
     messagesTtl,
     enable1h: isTruthy(enable1h),
     setting: settings?.promptCacheTtl,
-    login: identity?.kind,
+    thirdParty: thirdParty.some(Boolean),
     overLimit: (usage?.rateLimits ?? []).some(r => r.percentUsed >= 100),
   })
   s.ttlMs = ttl.ms
@@ -855,38 +859,56 @@ async function afterCompact($: EngineInterface, s: State) {
  * Compacts between turns. A hook cannot: both calls refuse inside `prompt.submit`, whose turn they would wait on.
  * An SDK session, as the desktop app runs, has no `$.session.compact`; `/compact` there resolves once it is done, and its
  * session.compact reaches this mod's hook. Resolves whether it compacted; a refusal, from JetCompact or the engine, is false.
- * One that outlasts COMPACT_WAIT_MS counts as refused, because messages wait on the answer.
+ * One that outlasts COMPACT_WAIT_MS counts as not done, because messages wait on the answer; the engine still runs a prompt
+ * only once it is idle, so a late compaction lands ahead of them.
  */
 async function compactNow($: EngineInterface, s: State): Promise<boolean> {
   const seen = s.compactions
+  let late = false
   const compact = async () => {
     try {
       const { skip } = await $.session.compact()
       if (skip === undefined) await afterCompact($, s)
     } catch {
-      await $.command.run({ command: 'compact' }).catch(() => undefined)
+      if (!late) await $.command.run({ command: 'compact' }).catch(() => undefined)
     }
   }
-  await Promise.race([compact(), new Promise<void>(done => { $.clock.after(COMPACT_WAIT_MS, done) })])
+  await Promise.race([compact(), new Promise<void>(done => { $.clock.after(COMPACT_WAIT_MS, () => { late = true; done() }) })])
   return s.compactions !== seen
 }
 
-/** Compacts, then sends what waited for it. Sent whatever the compaction did: a message that vanished would cost more than a cold write. */
+const queueKey = (s: State) => `${KEY_QUEUED}:${s.sid}`
+
+/** Keeps a dropped message where a reload or a restart cannot lose it: the engine no longer has it. */
+async function enqueue($: EngineInterface, s: State, text: string) {
+  s.compacting = [...(s.compacting ?? []), text]
+  await $.store.set(queueKey(s), s.compacting)
+}
+
+/**
+ * Compacts, then sends what waited for it. Sent whatever the compaction did: a message that vanished would cost more than a
+ * cold write. After a /clear in the meantime it goes to the new conversation, as it would have had it come a moment later.
+ */
 async function compactThenSend($: EngineInterface, s: State, why: string) {
   const before = s.ctx
+  const key = queueKey(s)
   const compacted = await compactNow($, s)
   const texts = s.compacting ?? []
   s.compacting = null
-  s.ackedAt = 0
-  if (compacted) {
-    s.compactedFrom = before
-    s.note = `Compacted from ${fmtTok(before)} tokens first, ${why}.`
-  } else {
-    s.coldWritePending = true
-    s.note = 'The compaction was refused, so this paid the whole write.'
+  if (queueKey(s) === key) {
+    s.ackedAt = 0
+    if (compacted) {
+      s.compactedFrom = before
+      s.note = `Compacted from ${fmtTok(before)} tokens first, ${why}.`
+    } else {
+      s.coldWritePending = true
+      s.note = 'The compaction did not go through, so this may have paid the whole write.'
+    }
+    $.ui.log(compacted ? `compacted from ${fmtTok(before)} tokens before sending, ${why}.` : 'the compaction did not go through, so the message may have gone out cold.')
   }
-  $.ui.log(compacted ? `compacted from ${fmtTok(before)} tokens before sending, ${why}.` : 'the compaction was refused, so the message went out cold.')
   for (const text of texts) await $.prompt.submit({ text, asUser: true })
+  await $.store.delete(key)
+  await $.store.delete(queueKey(s))
 }
 
 async function compactAndSend($: EngineInterface, s: State) {
@@ -894,7 +916,7 @@ async function compactAndSend($: EngineInterface, s: State) {
   if (!h) return
   await release($)
   if (h.isPreview) return
-  s.compacting = [h.text]
+  await enqueue($, s, h.text)
   await compactThenSend($, s, 'as you chose on the card')
 }
 
@@ -1196,6 +1218,12 @@ export const register: Register = (on, options) => {
     if (s.always) await armAlways($, s, now)
     // The classic start arms a restored window too, but a managed plugin above this tier may continue beneath it; arming twice leaves one timer.
     else if (s.deadline) await arm($, s)
+    // Messages a reload or a restart caught between their drop and their resend.
+    const queued = await $.store.get(queueKey(s))
+    if (Array.isArray(queued) && queued.length) {
+      s.compacting = queued.filter(text => typeof text === 'string')
+      $.clock.after(0, () => { void compactThenSend($, s, 'because a message was waiting for it') })
+    }
     await $.command.register({
       name: 'keepwarm',
       description: `Keep the prompt cache warm: bare for ${fmtDuration(s.windowMs)}, a window such as 90m, always, off, or status (cache-watch)`,
@@ -1373,14 +1401,14 @@ export const register: Register = (on, options) => {
       return next(e)
     }
     // A message that comes in while a compaction runs goes out after it, in order.
-    if (s.compacting) {
-      s.compacting.push(e.text)
+    if (s.compacting && canHold(e.text, e.attachments)) {
+      await enqueue($, s, e.text)
       return { drop: COMPACTING_DROP }
     }
     if (!isCold(s, now) || s.ctx < BIG_TOKENS) return next(e)
-    // Nobody at a phone can choose on a card, so the cheap way out is taken for them. Only a timer can compact.
-    if (s.coldCompact && isRemote(e.origin) && canHold(e.text, e.attachments)) {
-      s.compacting = [e.text]
+    // Nobody at a phone can choose on a card, so the cheap way out is taken for them. Only a timer can compact, and only between turns.
+    if (s.coldCompact && isRemote(e.origin) && canHold(e.text, e.attachments) && !e.turnId && !s.compacting) {
+      await enqueue($, s, e.text)
       $.clock.after(0, () => { void compactThenSend($, s, 'because it came from a remote session') })
       return { drop: COMPACTING_DROP }
     }
@@ -1542,7 +1570,7 @@ export const register: Register = (on, options) => {
     s.lastModel = e.to_model
     s.ttlMs = e.cache_ttl === '5m' ? TTL_5M_MS : TTL_1H_MS
     s.ttlSource = 'the model switch'
-    if (!e.prompt_cache_warm) {
+    if (e.from_model !== e.to_model) {
       s.lastRequestAt = 0
       outdate(s)
       await arm($, s)
