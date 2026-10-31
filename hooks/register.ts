@@ -1,4 +1,4 @@
-// cache-watch: karanb192/cache-tax 2.2.1 (MIT) with a hold card. A cold send
+// cache-watch: karanb192/cache-tax 2.3.1 (MIT) with a hold card. A cold send
 // is held above the prompt with its price and three buttons, instead of being
 // dropped with the price as text. Everything else is upstream's.
 import { atom, read, update } from 'claude-code'
@@ -845,7 +845,7 @@ export const register: Register = on => {
           ] }),
           Box({ flexDirection: 'row', gap: 1, alignItems: 'center', children: [
             Box({ flexShrink: 0, children: [shield] }),
-            Text({ wrap: 'wrap', children: [`Pay once and keepwarm then holds the cache for ${fmtDuration(AUTO_WARM_MS)}.`] }),
+            Text({ wrap: 'wrap', children: [`Pay once and keepwarm then holds the cache for ${fmtDuration(holdMs(s))}.`] }),
           ] }),
         ] }),
         ...statusCard,
@@ -1173,7 +1173,7 @@ export const register: Register = on => {
     }
     if (s.guard === 'warn') {
       if (s.hasBand) s.note = 'Your message went straight through, because the guard is set to warn.'
-      else $.ui.log(`${guardText(s, now)} Sending anyway; keepwarm will hold the cache for ${fmtDuration(AUTO_WARM_MS)} once it lands.`)
+      else $.ui.log(`${guardText(s, now)} Sending anyway; keepwarm will hold the cache for ${fmtDuration(holdMs(s))} once it lands.`)
       s.coldWritePending = true
       await release($)
       return next(e)
@@ -1183,7 +1183,7 @@ export const register: Register = on => {
       if (s.hasBand) s.note = e.origin.kind === 'bridge'
         ? 'Your message went straight through, because it came over Remote Control, where the card can\'t show.'
         : 'Your message went straight through, because no one was at the prompt to choose on the card.'
-      else $.ui.log(`${guardText(s, now)} Sending anyway, because no one at this prompt sent it; keepwarm will hold the cache for ${fmtDuration(AUTO_WARM_MS)} once it lands.`)
+      else $.ui.log(`${guardText(s, now)} Sending anyway, because no one at this prompt sent it; keepwarm will hold the cache for ${fmtDuration(holdMs(s))} once it lands.`)
       s.coldWritePending = true
       await release($)
       return next(e)
