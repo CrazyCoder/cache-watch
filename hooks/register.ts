@@ -1127,15 +1127,15 @@ export const register: Register = (on, options) => {
         ] }),
         ...statusCard,
       ] })
-      const buttons = Box({ flexDirection: 'row', gap: 2, alignItems: 'center', children: [
+      // Desktop buttons stand taller than a text row and ride up over the card without a margin; a gap on the column would also push the card down from the empty `rest`.
+      const buttons = Box({ flexDirection: 'row', gap: 2, alignItems: 'center', marginTop: compact && e.surface === 'desktop' ? 1 : 0, children: [
         Button({ key: 'pay', label: 'Pay and send', variant: 'primary', onPress: () => { void payAndSend($, s) } }),
         ...(s.coldCompact ? [Button({ key: 'compact', label: 'Compact and send', onPress: () => { void compactAndSend($, s) } })] : []),
         Button({ key: 'fresh', label: 'Start fresh', onPress: () => { void startFresh($) } }),
         Button({ key: 'status', label: isOpen ? 'Hide cache status' : 'Show cache status', plain: true, onPress: () => { void update($, showStatus, open => !open) } }),
         Button({ key: 'close', label: 'Close', plain: true, onPress: () => { void closeCard($, s) } }),
       ] })
-      // Desktop buttons stand taller than a text row, so without a gap they ride up over the card.
-      return Box({ flexDirection: 'column', gap: compact && e.surface !== 'desktop' ? 0 : 1, children: [rest, holdCard, buttons] })
+      return Box({ flexDirection: 'column', gap: compact ? 0 : 1, children: [rest, holdCard, buttons] })
     }
     // A cold resume's note, styled like the compact hold card, in place of a transcript line no hook can restyle.
     const note = await read($, resumed)
