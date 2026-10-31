@@ -1,5 +1,5 @@
 {
-  "description": "cache-watch (Mod): session.start, session.attach, session.end, classic.SessionStart, command.run{command=keepwarm|cache-watch}, prompt.submit, turn.step, turn.complete, session.compact, ui.render{AbovePrompt|SessionMode}.",
+  "description": "cache-watch (Mod): session.start, session.attach, session.end, classic.SessionStart, command.run{command=keepwarm|cache-watch}, prompt.submit, turn.step, turn.complete, session.compact, classic.PostModelSwitch, ui.render{AbovePrompt|SessionMode}.",
   "modules": [
     "./register.ts"
   ]

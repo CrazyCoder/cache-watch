@@ -40,8 +40,21 @@ export type ResumeNote = {
   warmUsd: number | null
 }
 
+/** What must outlive a reload of the mod, which runs register again with no classic.SessionStart after it. */
+export type Snapshot = {
+  sid: string
+  lastRequestAt: number
+  lastModel: string | null
+  ctx: number
+  compacted: boolean
+  ackedAt: number
+  misses: Array<{ at: number; tokens: number; usd: number | null }>
+  last: { at: number; read: number; write: number; usd: number | null; warm: boolean } | null
+  stopped: string | null
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'cache-watch': { held: Held | null; showStatus: boolean; receipt: Receipt | null; resumed: ResumeNote | null }
+    'cache-watch': { held: Held | null; showStatus: boolean; receipt: Receipt | null; resumed: ResumeNote | null; snapshot: Snapshot | null }
   }
 }

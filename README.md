@@ -99,13 +99,14 @@ Then restart the app again. A running session keeps the copy it started with.
 
 | Command | What it does |
 |---|---|
-| `/keepwarm` | Keep the cache warm for 6 hours |
+| `/keepwarm` | Keep the cache warm for the default window, 6 hours unless set otherwise |
 | `/keepwarm 90m` | Keep it warm for a window of your own (`2h30m`, `45m`) |
-| `/keepwarm always` | Start a 6-hour window in every session, until `/keepwarm off` |
+| `/keepwarm always` | Keep every session warm for the default window after each turn, until `/keepwarm off` |
 | `/keepwarm status` | Time left in the window, next ping, last ping's cost |
 | `/keepwarm off` | Stop, and turn `always` off |
 | `/cache-watch` | The status card: state, context size, cold cost, keepwarm, this session's cold writes |
 | `/cache-watch pay` | Same as the Pay and send button |
+| `/cache-watch compact` | Same as the Compact and send button, with the `coldCompact` option |
 | `/cache-watch fresh` | Same as the Start fresh button, on the hold card or the resume card |
 | `/cache-watch dismiss` | Close the resume card |
 | `/cache-watch preview` | Show the hold card with this session's numbers, without holding anything |
@@ -124,6 +125,10 @@ The buttons have command twins on purpose. In the desktop app a click can get lo
 - **`/cache-watch`** instead of `/cache-tax`.
 
 Everything else is cache-tax's: the guard's logic, keepwarm, the cost maths and the price table.
+
+## Options
+
+`windowMinutes`, `always`, `cutoffTime` and `coldCompact` live in `/config`; [the reference](docs/commands.md#settings-and-environment) says what each does.
 
 ## Docs
 

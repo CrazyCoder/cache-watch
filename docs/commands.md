@@ -6,10 +6,10 @@ Every command, label and setting in cache-watch 1.2.0. For the reasons behind th
 
 | Command | Effect |
 |---|---|
-| `/keepwarm` | Arms a 6-hour window for this session. |
+| `/keepwarm` | Arms the default window for this session: 6 hours, or the `windowMinutes` option. |
 | `/keepwarm <window>` | Arms a window of your own. A window is hours, minutes or both: `90m`, `2h`, `2h30m`. |
 | `/keepwarm <window> every <gap>` | Arms a window with its own ping gap, at least `1m`. The gap lasts for that window only; the next window goes back to 55 minutes. Short gaps are for testing: `/keepwarm 1h every 1m` shows a ping's cost within a minute. |
-| `/keepwarm always` | Arms a 6-hour window now and at the start of every session, until `/keepwarm off`. |
+| `/keepwarm always` | Keeps every session warm for the default window after each of its turns, until `/keepwarm off`. |
 | `/keepwarm status` | Says the time left, the next ping, and what the last ping read and cost. |
 | `/keepwarm off` | Ends the window and turns `always` off. |
 
@@ -31,6 +31,7 @@ The reason shows in `/keepwarm status` and on the `/cache-watch` card.
 | `/cache-watch` | Prints the status card (below). `/cache-watch status` does the same. |
 | `/cache-watch pay` | Sends the held message and pays the cold write, as the **Pay and send** button does. |
 | `/cache-watch fresh` | Runs `/clear` and puts the held message back in the prompt box, as **Start fresh** does. With no message held and the resume card showing, it only runs `/clear`. |
+| `/cache-watch compact` | Compacts, then sends the held message, as **Compact and send** does; with no message held and the resume card up, compacts only. Needs the `coldCompact` option. |
 | `/cache-watch dismiss` | Closes the resume card, as its **Dismiss** button does. |
 | `/cache-watch preview` | Shows the hold card with this session's numbers, holding nothing. Any button closes it. |
 | `/cache-watch guard refuse` | Holds a cold send once on the card. This is the default. |
@@ -100,6 +101,17 @@ The card goes when you send a message, run `/clear`, or press either button. You
 After a paid cold write, a receipt pill above the prompt box says what the write cost and how long keepwarm now holds the cache. It goes at your next message, or after 15 minutes.
 
 ## Settings and environment
+
+Options live in `/config`, or under `pluginConfigs` in `settings.json`:
+
+| Option | Default | Effect |
+|---|---|---|
+| `windowMinutes` | `360` | The default window: bare `/keepwarm`, and how long after a turn `always` keeps the cache warm. |
+| `always` | off | Same as `/keepwarm always` for every session. `/keepwarm off` stays off until `/keepwarm always`. |
+| `cutoffTime` | none | A local time such as `21:30`. Past it no automatic window opens or lasts, until midnight. An explicit `/keepwarm` is not cut. |
+| `coldCompact` | off | Adds the Compact buttons, and compacts before a cold send from Remote Control or the Telegram relay. Turn it on only where compaction is cheap on a cold cache, as JetCompact's is: the built-in summary reads the whole conversation uncached. |
+
+The cache's lifetime is Claude Code's, five minutes or an hour, read from its own rules at session start and before each ping. The status card's `lifetime` line says which and why. A five-minute cache gets no pings.
 
 - **Theme.** The colours follow Claude Code's light or dark theme, and change when you switch.
 - **`NO_COLOR`.** Set to anything non-empty before the session starts, it drops the colours and the cube image. The words carry the state on their own.

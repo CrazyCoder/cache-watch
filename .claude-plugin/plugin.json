@@ -1,6 +1,6 @@
 {
   "name": "cache-watch",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Watches the prompt cache: its state in the prompt footer, and a cold send held above the prompt with its price and Pay and send, Start fresh and Show cache status buttons. Fork of karanb192/cache-tax 2.3.1 (MIT). Warming uses model requests and costs tokens.",
   "author": {
     "name": "Barncore"
@@ -8,5 +8,32 @@
   "homepage": "https://github.com/Barncore/cache-watch",
   "repository": "https://github.com/Barncore/cache-watch",
   "license": "MIT",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "windowMinutes": {
+      "type": "number",
+      "title": "Default keepwarm window (minutes)",
+      "description": "How long bare /keepwarm lasts, and how long after a turn /keepwarm always keeps the cache warm.",
+      "default": 360,
+      "min": 1
+    },
+    "always": {
+      "type": "boolean",
+      "title": "Keepwarm always",
+      "description": "Keep every session warm for the default window after each turn, until /keepwarm off.",
+      "default": false
+    },
+    "cutoffTime": {
+      "type": "string",
+      "title": "Daily cutoff time (HH:MM, 24-hour)",
+      "description": "Local time after which no automatic window opens or lasts, until midnight. An explicit /keepwarm is not cut. Leave empty for no cutoff.",
+      "default": ""
+    },
+    "coldCompact": {
+      "type": "boolean",
+      "title": "Compact cold sends",
+      "description": "Adds Compact buttons to the cards, and compacts before a cold send from a remote session. Needs a compaction that is cheap on a cold cache, such as JetCompact's: the built-in summary reads the whole conversation uncached.",
+      "default": false
+    }
+  }
 }

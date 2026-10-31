@@ -3,7 +3,7 @@ import type { Plugin, TestBody } from 'claude-code/testing'
 import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
-import { HELD_DROP, RESUME_LOG_AFTER_MS, bar, canHold, compactStatsSvg, fmtDuration, footerLabel, freshState, parseDuration, quoted, resetForClear, resumeNoteFrom, seedFromResume, statsSvg, warmShare } from '../hooks/register'
+import { COMPACTING_DROP, HELD_DROP, RESUME_LOG_AFTER_MS, autoWindow, bar, canHold, compactStatsSvg, fmtDuration, footerLabel, freshState, isRemote, parseCutoff, parseDuration, quoted, resetForClear, resolveTtl, restore, resumeNoteFrom, seedFromResume, statsSvg, warmShare } from '../hooks/register'
 
 tier('user')
 
@@ -35,7 +35,7 @@ type ForkAnswer = null | ModelForkResult | { read: number; write: number; out?: 
 
 // The world beneath the mod: its store, the engine's answers, and a fork that
 // replies from a script so each test decides what the cache looked like.
-function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void> } = {}) {
+function world(on: On, forkAnswers: ForkAnswer[], opts: { compact?: () => { skip: string } | undefined; rateLimits?: () => Array<{ percentUsed: number }>; env?: Record<string, string>; store?: Map<string, unknown>; commands?: string[]; live?: { tokens?: number }; startedAt?: () => number; sid?: string | (() => string); model?: string | (() => string); bandText?: string; theme?: { value: string }; noColor?: boolean; denyTheme?: boolean; writtenTheme?: string; gate?: () => Promise<void>; steps?: TurnUsage[]; storeGate?: (op: 'get' | 'set' | 'delete', key: string) => Promise<void> } = {}) {
   if (opts.store) {
     const store = opts.store
     // A read takes its value first and is delivered after the gate, as a reply can arrive late.
@@ -45,7 +45,7 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     on('store.keys', () => ({ value: [...store.keys()] }))
   } else mock.store(on, {})
   const reads = { theme: 0, env: 0 }
-  on('env.get', ($, e) => { reads.env++; return { value: e.name === 'NO_COLOR' && opts.noColor ? '1' : undefined } })
+  on('env.get', ($, e) => { if (e.name === 'NO_COLOR') reads.env++; return { value: e.name === 'NO_COLOR' && opts.noColor ? '1' : opts.env?.[e.name] } })
   on('config.list', () => {
     reads.theme++
     return { value: [{ key: 'theme', label: 'Theme', kind: 'choice', value: opts.theme?.value ?? 'dark', provider: { plugin: 'engine', tier: 'core' }, isLocked: false }] }
@@ -59,7 +59,7 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: typeof opts.sid === 'function' ? opts.sid() : opts.sid ?? 'S1' }))
   on('session.model', () => ({ value: (typeof opts.model === 'function' ? opts.model() : opts.model) ?? 'claude-fable-5-1' }))
-  on('session.usage', () => ({ value: { startedAt: opts.startedAt?.() ?? START, context: { window: 1000000, tokens: opts.live?.tokens }, rateLimits: [] } }))
+  on('session.usage', () => ({ value: { startedAt: opts.startedAt?.() ?? START, context: { window: 1000000, tokens: opts.live?.tokens }, rateLimits: (opts.rateLimits?.() ?? []) as never } }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('command.list', () => ({ value: (opts.commands ?? []).map(name => ({ name, description: '', source: 'plugin' as const })) }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
@@ -69,7 +69,7 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { store?: Map<string, un
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: u }
   })
   on('prompt.submit', ($, e) => { entered.push(e.text); return { text: e.text } })
-  on('session.compact', ($, e) => ({ messages: e.messages }))
+  on('session.compact', ($, e) => opts.compact?.() ?? { messages: e.messages?.length ? e.messages : [{ role: 'user' as const, text: 'summary', toolUses: [] }] })
   on('classic.SessionStart', () => ({}))
   on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
   on('ui.status', ($, e) => { status.push(e.text); return { value: undefined } })
@@ -1024,7 +1024,7 @@ describe('hold card', () => {
     })
   }
 
-  for (const [kind, note] of [['bridge', /because it came over Remote Control, where the card can't show\./], ['scheduled-trigger', /because no one was at the prompt to choose on the card\./]] as const) {
+  for (const [kind, note] of [['bridge', /because it came from a remote session, where the card can't show\./], ['scheduled-trigger', /because no one was at the prompt to choose on the card\./]] as const) {
     test(`a ${kind} send goes through with the price, since no one there can press the card`, async ($, on) => {
       const clock = mock.clock(on, { now: START })
       const w = world(on, [])
@@ -2766,5 +2766,300 @@ describe('a managed plugin above the user tier', () => {
     expect(w.logs).toEqual([])
     expect(w.status.at(-1)).toBe('goes cold in 1h00m')
     expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/session     0 cold writes paid/)
+  })
+})
+
+describe('precompute and refused compactions', () => {
+  for (const [label, trigger, compact] of [
+    ['a precompute', 'precompute', undefined],
+    ['a skipped compaction', 'manual', () => ({ skip: 'jetcompact said no' })],
+  ] as const) {
+    test(`${label} leaves the cache clock, the footer and the pings as they were`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [warm], { compact })
+      await $.session.start(session)
+      await $.turn.complete(turn())
+      await $.command.run(run('keepwarm', '3h'))
+      await clock.advance(10 * MIN)
+      await $.session.compact({ trigger, messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
+      expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/state       warm, 50m left/)
+      await clock.advance(46 * MIN)
+      expect(w.forks.length).toBe(1)
+    })
+  }
+
+  test('a real compaction resets the state', async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [])
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
+    expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/state       reset by compaction/)
+  })
+})
+
+describe('a reload of the mod', () => {
+  test('puts back what it knew about the same conversation, and nothing about another', () => {
+    const saved = { sid: 'S1', lastRequestAt: 5, lastModel: 'm', ctx: 7, compacted: false, ackedAt: 0, misses: [], last: null, stopped: null }
+    const same = freshState()
+    restore(same, saved, 'S1')
+    expect(same.lastRequestAt).toBe(5)
+    expect(same.ctx).toBe(7)
+    const other = freshState()
+    restore(other, saved, 'S2')
+    expect(other.lastRequestAt).toBe(0)
+    restore(other, null, 'S2')
+    expect(other.lastRequestAt).toBe(0)
+  })
+})
+
+describe('the cache lifetime', () => {
+  const base = { force5m: false, enable1h: false, overLimit: false }
+  test('follows the order of choice', () => {
+    expect(resolveTtl({ ...base, login: 'claude.ai' }).ms).toBe(HOUR)
+    expect(resolveTtl({ ...base }).ms).toBe(HOUR)
+    expect(resolveTtl({ ...base, login: 'claude.ai', overLimit: true }).ms).toBe(5 * MIN)
+    expect(resolveTtl({ ...base, login: 'api-key' }).ms).toBe(5 * MIN)
+    expect(resolveTtl({ ...base, login: 'api-key', setting: '1h' }).ms).toBe(HOUR)
+    expect(resolveTtl({ ...base, login: 'api-key', setting: '6h' }).ms).toBe(5 * MIN)
+    expect(resolveTtl({ ...base, login: 'claude.ai', setting: '5m' }).ms).toBe(5 * MIN)
+    expect(resolveTtl({ ...base, login: 'api-key', enable1h: true }).ms).toBe(HOUR)
+    expect(resolveTtl({ ...base, setting: '1h', ttlEnv: '5m' }).ms).toBe(5 * MIN)
+    expect(resolveTtl({ ...base, setting: '1h', force5m: true }).ms).toBe(5 * MIN)
+    expect(resolveTtl({ ...base, login: 'claude.ai', messagesTtl: '5m' }).ms).toBe(5 * MIN)
+  })
+
+  test('a five-minute cache counts down five minutes and gets no ping', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm], { env: { CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' } })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    expect((await $.command.run(run('keepwarm', '3h'))).text).toMatch(/goes cold before a ping can reach it/)
+    expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/lifetime    5m/)
+    await clock.advance(HOUR)
+    expect(w.forks.length).toBe(0)
+    expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/state       COLD/)
+  })
+
+  test('a ping is not sent once the session went past its limits, since the cache dropped to five minutes', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let percentUsed = 50
+    const w = world(on, [warm], { rateLimits: () => [{ percentUsed }] })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '3h'))
+    percentUsed = 100
+    await clock.advance(56 * MIN)
+    expect(w.forks.length).toBe(0)
+  })
+
+  test('a model switch that left the new model cold stops the clock and the pings until a turn', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm])
+    on('classic.PostModelSwitch', () => ({}))
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.command.run(run('keepwarm', '3h'))
+    await $.classic.PostModelSwitch({ from_model: 'a', to_model: 'claude-opus-5-5', context_tokens: 1000, prompt_cache_warm: false, cache_ttl: '1h', estimated_cache_write_usd: 1, pricing: 'catalog' } as never)
+    await clock.advance(56 * MIN)
+    expect(w.forks.length).toBe(0)
+    await $.turn.complete(turn())
+    await clock.advance(56 * MIN)
+    expect(w.forks.length).toBe(1)
+  })
+})
+
+describe('window options', () => {
+  test('parseCutoff reads a 24-hour time and nothing else', () => {
+    expect(parseCutoff('21:30')).toBe(21 * 60 + 30)
+    expect(parseCutoff(' 7:05 ')).toBe(7 * 60 + 5)
+    for (const bad of ['', '24:00', '9pm', '21:60', null, undefined, 2130]) expect(parseCutoff(bad)).toBe(null)
+  })
+
+  test('autoWindow cuts at the cutoff and opens nothing from it until midnight', () => {
+    const at = (h: number, m = 0) => new Date(2026, 9, 31, h, m).getTime()
+    const s = { cutoffMinutes: 21 * 60 }
+    expect(autoWindow(s, at(12), 2 * HOUR)).toBe(2 * HOUR)
+    expect(autoWindow(s, at(20), 2 * HOUR)).toBe(HOUR)
+    expect(autoWindow(s, at(21), 2 * HOUR)).toBe(0)
+    expect(autoWindow(s, at(23), 2 * HOUR)).toBe(0)
+    expect(autoWindow({ cutoffMinutes: null }, at(23), 2 * HOUR)).toBe(2 * HOUR)
+  })
+
+  test('the always option arms the default window with no command, and rolls it', { options: { always: true, windowMinutes: 120 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    world(on, [], { store })
+    await $.session.start(session)
+    expect(store.get('deadline:S1')).toBe(START + 2 * HOUR)
+    await clock.advance(HOUR)
+    await $.turn.complete(turn())
+    expect(store.get('deadline:S1')).toBe(START + 3 * HOUR)
+  })
+
+  test('/keepwarm off beats the always option in later sessions too', { options: { always: true } }, async ($, on) => {
+    mock.clock(on, { now: START })
+    const store = new Map<string, unknown>()
+    world(on, [], { store })
+    await $.session.start(session)
+    await $.command.run(run('keepwarm', 'off'))
+    expect(store.get('always')).toBe(false)
+    await $.session.start(session)
+    expect(store.get('deadline:S1')).toBe(undefined)
+  })
+
+  test('bare /keepwarm takes the default window', { options: { windowMinutes: 90 } }, async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [])
+    await $.session.start(session)
+    expect((await $.command.run(run('keepwarm', ''))).text).toMatch(/keepwarm on for 1h30m/)
+  })
+
+  test('past the cutoff always opens no window, while an explicit one is not cut', { options: { always: true, cutoffTime: '00:00' } }, async ($, on) => {
+    mock.clock(on, { now: new Date(2026, 9, 31, 12).getTime() })
+    const store = new Map<string, unknown>()
+    world(on, [], { store })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    expect(store.get('deadline:S1')).toBe(undefined)
+    await $.command.run(run('keepwarm', '3h'))
+    expect(typeof store.get('deadline:S1')).toBe('number')
+  })
+})
+
+describe('compacting a cold send', () => {
+  const cold = async ($: Parameters<TestBody>[0], clock: { advance(ms: number): Promise<unknown> }) => {
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+  }
+  const relay = { kind: 'plugin', name: 'cc-relay' } as const
+
+  test('isRemote covers Remote Control and the relay, and no other plugin', () => {
+    expect(isRemote({ kind: 'bridge' })).toBe(true)
+    expect(isRemote(relay)).toBe(true)
+    expect(isRemote({ kind: 'plugin', name: 'cache-watch' })).toBe(false)
+    expect(isRemote({ kind: 'composer' })).toBe(false)
+  })
+
+  for (const origin of [{ kind: 'bridge' }, relay] as const) {
+    test(`a cold ${origin.kind} send compacts first, then goes out as the person's words, with no card`, { options: { coldCompact: true } }, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on, [])
+      await cold($, clock)
+      expect((await $.prompt.submit({ text: 'hi', wait: false, origin })).drop).toBe(COMPACTING_DROP)
+      await clock.advance(1)
+      expect(w.entered).toEqual(['hi'])
+      expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/state       reset by compaction/)
+      expect(w.logs.at(-1)).toMatch(/^compacted from 201k tokens before sending, because it came from a remote session/)
+      const ui = await $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
+      expect(await ui.find({ text: /on hold/ })).toBe(undefined)
+      await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 20000 }) }))
+      expect(await ui.find({ text: /Compacted from 201k tokens first/ })).toBeTruthy()
+      expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/session     0 cold writes paid/)
+    })
+  }
+
+  test('an SDK session, with no $.session.compact, goes through /compact', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let compacts = 0
+    const w = world(on, [], { compact: () => { throw new Error('not available in a headless session') } })
+    on('command.run', { command: 'compact' }, () => { compacts++; return { text: '' } })
+    await cold($, clock)
+    await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'bridge' } })
+    await clock.advance(1)
+    expect(compacts).toBe(1)
+    expect(w.entered).toEqual(['hi'])
+  })
+
+  test('a refused compaction still sends the message, and the write is scored', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [], { compact: () => ({ skip: 'below 25% minimum' }) })
+    await cold($, clock)
+    await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'bridge' } })
+    await clock.advance(1)
+    expect(w.entered).toEqual(['hi'])
+    expect(w.logs.at(-1)).toMatch(/the compaction was refused/)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/session     1 cold write paid/)
+  })
+
+  test('messages that arrive during the compaction follow it in order', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let open = () => {}
+    const gate = new Promise<void>(r => { open = r })
+    let calls = 0
+    const w = world(on, [], { compact: () => { if (++calls === 1) throw new Error('not available in a headless session'); return undefined } })
+    on('command.run', { command: 'compact' }, async () => { await gate; return { text: '' } })
+    await cold($, clock)
+    await $.prompt.submit({ text: 'first', wait: false, origin: { kind: 'bridge' } })
+    await clock.advance(1)
+    expect((await $.prompt.submit({ text: 'second', wait: false, origin: relay })).drop).toBe(COMPACTING_DROP)
+    open()
+    await clock.advance(1)
+    expect(w.entered.slice(-2)).toEqual(['first', 'second'])
+  })
+
+  test('a remote send with an attachment cannot be resent, so it goes out cold', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [])
+    await cold($, clock)
+    expect((await $.prompt.submit({ text: 'look', wait: false, origin: { kind: 'bridge' }, attachments: [{ type: 'image' }] })).drop).toBe(undefined)
+  })
+
+  test('with the option off a remote send goes straight through, the relay\'s too, and is scored', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [])
+    await cold($, clock)
+    expect((await $.prompt.submit({ text: 'hi', wait: false, origin: relay })).drop).toBe(undefined)
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/session     1 cold write paid/)
+  })
+
+  test('another plugin\'s prompt is not touched', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [])
+    await cold($, clock)
+    expect((await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'plugin', name: 'other' } })).drop).toBe(undefined)
+  })
+
+  test('Compact and send on the card, and its command twin', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [])
+    await cold($, clock)
+    await $.prompt.submit(prompt('from the desk'))
+    const ui = await $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
+    await ui.press({ key: 'compact' })
+    await clock.advance(1)
+    expect(w.entered.at(-1)).toBe('from the desk')
+    await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('again'))
+    expect((await $.command.run(run('cache-watch', 'compact'))).text).toMatch(/compacting, then the held message/)
+    await clock.advance(1)
+    expect(w.entered.at(-1)).toBe('again')
+  })
+
+  test('no Compact button, and the command says why, with the option off', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [])
+    await cold($, clock)
+    await $.prompt.submit(prompt('hi'))
+    const ui = await $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
+    expect(await ui.find({ key: 'compact' })).toBe(undefined)
+    expect((await $.command.run(run('cache-watch', 'compact'))).text).toMatch(/the coldCompact option/)
+  })
+
+  test('Compact on the resume card closes it and sends nothing', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: 400 * HOUR })
+    const w = world(on, [])
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
+    const ui = await $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'AbovePrompt', props: { ...bandProps, maxRows: 40 } })
+    await $.classic.SessionStart({ source: 'resume', seconds_since_last_response: 7200, context_tokens: 200000, prompt_cache_likely_expired: true })
+    await ui.press({ key: 'resume-compact' })
+    await clock.advance(1)
+    expect(await ui.find({ text: /Resuming a cold chat/ })).toBe(undefined)
+    expect(w.entered).toEqual([])
+    expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/state       reset by compaction/)
   })
 })

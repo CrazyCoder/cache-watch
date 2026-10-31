@@ -3,10 +3,11 @@
 // dropped with the price as text. Everything else is upstream's.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PromptOrigin, Register, RenderElement } from 'claude-code'
-import type { Held, Receipt, ResumeNote } from '../types'
+import type { Held, Receipt, ResumeNote, Snapshot } from '../types'
 import { statusIcons } from './status-icons'
 
-const TTL_MS = 60 * 60 * 1000
+const TTL_1H_MS = 60 * 60 * 1000
+const TTL_5M_MS = 5 * 60 * 1000
 const PING_AFTER_MS = 55 * 60 * 1000
 const MIN_PING_MS = 60 * 1000
 const MAX_RETRIES = 3
@@ -20,6 +21,8 @@ const KEY_EVERY = 'every'
 const KEY_GUARD = 'guard'
 const KEY_ALWAYS = 'always'
 const KEY_FOOTER = 'footer'
+/** The relay's prompts reach the session as this plugin's, from a phone that shows no card. */
+const RELAY_PLUGIN = 'cc-relay'
 
 const LONG_PROMPT_TOKENS = 100000
 
@@ -85,6 +88,21 @@ export type State = {
   stepWrites: StepWrites | null
   steps: number
   endingSid: string
+  /** The prompt cache's lifetime in this session, and what chose it. */
+  ttlMs: number
+  ttlSource: string
+  /** The default window: bare /keepwarm, always. */
+  windowMs: number
+  /** The `always` option; the stored switch, once set, wins over it. */
+  alwaysOption: boolean
+  /** Minutes after midnight past which no automatic window opens or lasts; null for none. */
+  cutoffMinutes: number | null
+  /** Whether a cold send may be compacted first. Compaction must be cheap on a cold cache, as JetCompact's is. */
+  coldCompact: boolean
+  /** Messages waiting for the compaction under way, oldest first; null when none runs. */
+  compacting: string[] | null
+  /** The context before the compaction a send just went through, for its receipt; 0 when none. */
+  compactedFrom: number
 }
 
 /** What this turn's main requests wrote before any compaction it saw, priced per request where the steps reported usage. */
@@ -99,6 +117,70 @@ function priceOf(model: string | null, promptTokens: number): [number, number, n
     if (typeof family === 'string' ? m.includes(family) : family.test(m)) return [read, write, output]
   }
   return null
+}
+
+const isTruthy = (value: unknown) => ['1', 'true', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase())
+
+export type TtlInputs = {
+  force5m: boolean
+  ttlEnv?: string
+  setting?: unknown
+  enable1h: boolean
+  messagesTtl?: string
+  /** `$.session.identity().kind`; undefined when the host did not answer. */
+  login?: string
+  overLimit: boolean
+}
+
+/** Claude Code's order of choice; an unknown login stays at the hour a subscription gets. */
+export function resolveTtl(c: TtlInputs): { ms: number; source: string } {
+  const pick = (): ['5m' | '1h', string] => {
+    if (c.force5m) return ['5m', 'FORCE_PROMPT_CACHING_5M']
+    if (c.ttlEnv === '5m' || c.ttlEnv === '1h') return [c.ttlEnv, 'CLAUDE_CODE_PROMPT_CACHE_TTL']
+    if (c.setting === '5m' || c.setting === '1h') return [c.setting, 'promptCacheTtl setting']
+    if (c.enable1h) return ['1h', 'ENABLE_PROMPT_CACHING_1H']
+    if (c.login === undefined || c.login === 'claude.ai') return c.overLimit ? ['5m', 'subscription past its limits'] : ['1h', 'subscription']
+    return ['5m', 'automatic']
+  }
+  const [ttl, source] = pick()
+  if (ttl === '1h' && c.messagesTtl === '5m') return { ms: TTL_5M_MS, source: `${source}, held by CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL` }
+  return { ms: ttl === '5m' ? TTL_5M_MS : TTL_1H_MS, source }
+}
+
+/** Reads the session's cache lifetime. Past its limits a subscription drops to five minutes mid-session, so a ping reads it again. */
+async function readTtl($: EngineInterface, s: State) {
+  const [force5m, ttlEnv, messagesTtl, enable1h, settings, identity, usage] = await Promise.all([
+    $.env.get('FORCE_PROMPT_CACHING_5M'),
+    $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL'),
+    $.env.get('CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL'),
+    $.env.get('ENABLE_PROMPT_CACHING_1H'),
+    $.settings.read().catch(() => null),
+    $.session.identity().catch(() => null),
+    $.session.usage().catch(() => null),
+  ])
+  const ttl = resolveTtl({
+    force5m: isTruthy(force5m),
+    ttlEnv,
+    messagesTtl,
+    enable1h: isTruthy(enable1h),
+    setting: settings?.promptCacheTtl,
+    login: identity?.kind,
+    overLimit: (usage?.rateLimits ?? []).some(r => r.percentUsed >= 100),
+  })
+  s.ttlMs = ttl.ms
+  s.ttlSource = ttl.source
+}
+
+/** A 24-hour `HH:MM` as minutes after midnight; anything else means no cutoff. */
+export function parseCutoff(value: unknown): number | null {
+  const m = typeof value === 'string' ? /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(value.trim()) : null
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null
+}
+
+/** How long an automatic window opened now may last: `ms`, cut at today's cutoff; 0 from the cutoff until midnight. */
+export function autoWindow(s: Pick<State, 'cutoffMinutes'>, now: number, ms: number): number {
+  if (s.cutoffMinutes == null) return ms
+  return Math.max(0, Math.min(ms, new Date(now).setHours(0, s.cutoffMinutes, 0, 0) - now))
 }
 
 export function parseDuration(text: string): number | null {
@@ -146,14 +228,14 @@ function breakEvenPings(s: State): number | null {
 }
 
 function isCold(s: State, now: number): boolean {
-  return s.lastRequestAt > 0 && !s.compacted && now - s.lastRequestAt >= TTL_MS
+  return s.lastRequestAt > 0 && !s.compacted && now - s.lastRequestAt >= s.ttlMs
 }
 
 function guardText(s: State, now: number): string {
   const price = priceOf(s.lastModel, s.ctx)
   const rate = price ? `$${price[1]}/MTok` : 'the cache-write rate'
   const warm = warmUsd(s)
-  return `the prompt cache went cold ${fmtDuration(now - s.lastRequestAt - TTL_MS)} ago. Sending this re-writes ` +
+  return `the prompt cache went cold ${fmtDuration(now - s.lastRequestAt - s.ttlMs)} ago. Sending this re-writes ` +
     `up to ${s.ctx.toLocaleString('en-US')} tokens at ${rate} = ${fmtUsd(coldUsd(s))}` +
     (warm == null ? '' : ` (a warm turn would have cost ${fmtUsd(warm)})`) + '.'
 }
@@ -216,12 +298,12 @@ export function rowText(s: State, now: number): string | undefined {
   const keepwarm = statusText(s, now)
   if (keepwarm) return keepwarm
   if (!s.lastRequestAt || s.compacted) return undefined
-  return isCold(s, now) ? `cold for ${fmtDuration(now - s.lastRequestAt - TTL_MS)}` : `goes cold in ${fmtDuration(s.lastRequestAt + TTL_MS - now)}`
+  return isCold(s, now) ? `cold for ${fmtDuration(now - s.lastRequestAt - s.ttlMs)}` : `goes cold in ${fmtDuration(s.lastRequestAt + s.ttlMs - now)}`
 }
 
 /** A transcript resumed without the time of its last response: that response came after its first launch, so an hour after that launch the cache may be cold. */
 function mayBeCold(s: State, now: number): boolean {
-  return s.resumedAt > 0 && !s.lastRequestAt && now - s.resumedAt >= TTL_MS
+  return s.resumedAt > 0 && !s.lastRequestAt && now - s.resumedAt >= s.ttlMs
 }
 
 /** The line for a resumed session whose last response time never arrived: the cache may be cold, and this is what that would cost. */
@@ -280,8 +362,8 @@ export function footerLabel(s: State, now: number): FooterLabel | undefined {
     if (s.deadline) return { state: null, detail: `keepwarm ${fmtDuration(s.deadline - now)}`, sep: ' · ' }
     return s.stopped ? { state: null, detail: 'keepwarm stopped', sep: ' · ' } : undefined
   }
-  if (isCold(s, now)) return { state: 'cold', detail: `for ${fmtDuration(now - s.lastRequestAt - TTL_MS)}`, sep: ' ' }
-  const left = s.deadline ? s.deadline - now : s.lastRequestAt + TTL_MS - now
+  if (isCold(s, now)) return { state: 'cold', detail: `for ${fmtDuration(now - s.lastRequestAt - s.ttlMs)}`, sep: ' ' }
+  const left = s.deadline ? s.deadline - now : s.lastRequestAt + s.ttlMs - now
   return { state: 'warm', detail: `${fmtDuration(left)} left`, sep: ' · ' }
 }
 
@@ -356,7 +438,8 @@ async function stop($: EngineInterface, s: State, why: string | null, forgetAlwa
   disarm(s)
   await $.store.delete(deadlineKey(s))
   await $.store.delete(everyKey(s))
-  if (forgetAlways) await $.store.delete(KEY_ALWAYS)
+  // With the always option on, only a stored false keeps /keepwarm off across sessions.
+  if (forgetAlways) await (s.alwaysOption ? $.store.set(KEY_ALWAYS, false) : $.store.delete(KEY_ALWAYS))
   updateStatus($, s, await $.clock.now())
 }
 
@@ -402,7 +485,7 @@ async function reseat($: EngineInterface, s: State) {
   // seated under the old id, and a window opened meanwhile waits in memory for the id it belongs to.
   if (id === s.endingSid) return
   const now = await seat($, s, id)
-  if (s.always) await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
+  if (s.always) await armAlways($, s, now)
   // A window carried over, or armed while the conversation was ending, is written under this id.
   else if (s.deadline) await startWindow($, s, s.deadline - now, s.every)
   else updateStatus($, s, now)
@@ -420,7 +503,7 @@ async function arm($: EngineInterface, s: State) {
   if (now >= s.deadline) return stop($, s, null)
   // A cold window still needs expiry cleanup, but must not send a model request.
   if (s.lastRequestAt && !s.compacted && !isCold(s, now)) {
-    const untilCold = s.lastRequestAt + TTL_MS - now
+    const untilCold = s.lastRequestAt + s.ttlMs - now
     // Waiting for a turn sends nothing, but wakes when the cache goes cold so the row says so.
     if (s.waitForTurn) s.pending = $.clock.after(Math.min(s.deadline - now, untilCold), () => { void arm($, s) })
     else {
@@ -436,6 +519,8 @@ async function arm($: EngineInterface, s: State) {
 async function ping($: EngineInterface, s: State) {
   s.pending = null
   if (!s.deadline) return
+  // Read before the clock: a subscription that just went past its limits has five minutes, and a ping on that pays the whole write.
+  await readTtl($, s)
   const tick = s.tick
   const now = await $.clock.now()
   // A timer set or cancelled while the clock was read (an extension, a retry, a turn) owns the window now;
@@ -450,7 +535,7 @@ async function ping($: EngineInterface, s: State) {
   // A request since this timer was set moved the clock; schedule from it.
   if (now - s.lastRequestAt < s.every - 1000) return arm($, s)
   // A host that slept past a retry's slot must not send it inside the last minute.
-  if (s.retries && now >= s.lastRequestAt + TTL_MS - MIN_PING_MS) return stop($, s, s.retryReason + afterRetries(s.retries))
+  if (s.retries && now >= s.lastRequestAt + s.ttlMs - MIN_PING_MS) return stop($, s, s.retryReason + afterRetries(s.retries))
   const gen = s.gen
   const sentAt = s.lastRequestAt
   s.inFlight = true
@@ -475,7 +560,7 @@ async function ping($: EngineInterface, s: State) {
     // A busy or failing API is usually brief; retry while a ping can still land a minute before the cache goes cold.
     if (reply.reason === 'api-error' && (reply.status === null || reply.status === 429 || reply.status >= 500)) {
       const wait = MIN_PING_MS * 2 ** s.retries
-      if (s.retries < MAX_RETRIES && at + wait < Math.min(s.deadline, s.lastRequestAt + TTL_MS - MIN_PING_MS)) {
+      if (s.retries < MAX_RETRIES && at + wait < Math.min(s.deadline, s.lastRequestAt + s.ttlMs - MIN_PING_MS)) {
         s.retries++
         s.retryReason = reason
         // Replaces any timer set while the fork was out, such as a window extension's, so only the retry fires.
@@ -495,6 +580,7 @@ async function ping($: EngineInterface, s: State) {
   s.last = { at: now, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, usd, warm }
   if (!warm) return stop($, s, `the ping read ${fmtTok(u.cache_read_input_tokens)} and wrote ${fmtTok(u.cache_creation_input_tokens)} tokens (${fmtUsd(usd)}), the cache was already gone`)
   s.lastRequestAt = now
+  await remember($, s)
   await arm($, s)
 }
 
@@ -503,12 +589,26 @@ function afterRetries(n: number): string {
 }
 
 /** The reply to an arming command; on a cold cache it says when the first ping can come. */
-/** How long keepwarm holds the cache after a paid cold write: the rolling window when always is on. */
-function holdMs(s: State): number {
-  return s.always ? DEFAULT_WINDOW_MS : AUTO_WARM_MS
+/** How long keepwarm holds the cache after a paid cold write: the rolling window when always is on, and never past the cutoff. */
+function holdMs(s: State, now: number): number {
+  return autoWindow(s, now, s.always ? s.windowMs : AUTO_WARM_MS)
+}
+
+/** The always switch: the stored value once a command set one, else the option. */
+async function readAlways($: EngineInterface, s: State): Promise<boolean> {
+  const stored = await $.store.get(KEY_ALWAYS)
+  return stored === undefined ? s.alwaysOption : stored === true
+}
+
+/** Opens the rolling window; a longer one stays. Past the cutoff none opens, and a window restored from before it just runs on. */
+async function armAlways($: EngineInterface, s: State, now: number, offs = s.offs) {
+  const window = autoWindow(s, now, s.windowMs)
+  if (window) await startWindow($, s, Math.max(window, s.deadline - now), PING_AFTER_MS, offs)
+  else if (s.deadline) await arm($, s)
 }
 
 function armedText(s: State, now: number, windowMs: number): string {
+  if (s.every >= s.ttlMs) return `keepwarm on for ${fmtDuration(windowMs)}, but this session's ${fmtDuration(s.ttlMs)} cache goes cold before a ping can reach it, so none is sent`
   if (isCold(s, now)) return `keepwarm on for ${fmtDuration(windowMs)}. The cache is cold now, so the first ping comes ${fmtDuration(s.every)} after the next turn`
   return `keepwarm on for ${fmtDuration(windowMs)}, a ping ${fmtDuration(s.every)} after each idle stretch keeps the cache read, not re-written`
 }
@@ -543,10 +643,11 @@ function card(s: State, now: number): string {
   const lines: string[] = []
   lines.push(`${s.lastModel ?? 'model not seen yet'}`)
   if (s.compacted) lines.push('state       reset by compaction, waiting for the first turn')
-  else if (s.resumedAt) lines.push(mayBeCold(s, now) ? 'state       unknown, resumed without the time of its last response' : `state       resumed without the time of its last response, warm for up to ${fmtDuration(s.resumedAt + TTL_MS - now)} more`)
+  else if (s.resumedAt) lines.push(mayBeCold(s, now) ? 'state       unknown, resumed without the time of its last response' : `state       resumed without the time of its last response, warm for up to ${fmtDuration(s.resumedAt + s.ttlMs - now)} more`)
   else if (!s.lastRequestAt) lines.push('state       no request yet this session')
   else if (isCold(s, now)) lines.push(`state       COLD, last request ${fmtDuration(now - s.lastRequestAt)} ago`)
-  else lines.push(`state       warm, ${fmtDuration(s.lastRequestAt + TTL_MS - now)} left`)
+  else lines.push(`state       warm, ${fmtDuration(s.lastRequestAt + s.ttlMs - now)} left`)
+  lines.push(`lifetime    ${fmtDuration(s.ttlMs)} (${s.ttlSource})`)
   lines.push(`context     ${s.ctx.toLocaleString('en-US')} tokens`)
   lines.push(`cold cost   ${fmtUsd(coldUsd(s))} to re-write it (warm turn ${fmtUsd(warmUsd(s))})`)
   const always = s.always ? ' (always)' : ''
@@ -566,10 +667,23 @@ const held = atom({ plugin: 'cache-watch', key: 'held' } as const, null)
 const showStatus = atom({ plugin: 'cache-watch', key: 'showStatus' } as const, false)
 const receipt = atom({ plugin: 'cache-watch', key: 'receipt' } as const, null)
 const resumed = atom({ plugin: 'cache-watch', key: 'resumed' } as const, null)
+const snapshot = atom({ plugin: 'cache-watch', key: 'snapshot' } as const, null)
+
+async function remember($: EngineInterface, s: State) {
+  const { sid, lastRequestAt, lastModel, ctx, compacted, ackedAt, misses, last, stopped } = s
+  await update($, snapshot, () => ({ sid, lastRequestAt, lastModel, ctx, compacted, ackedAt, misses, last, stopped }))
+}
+
+/** Puts back what the mod knew before a reload, when it was about this conversation. */
+export function restore(s: State, saved: Snapshot | null, sid: string) {
+  if (saved?.sid === sid) Object.assign(s, saved)
+}
+
 /** How long a cold resume waits for a band before it logs its plain line instead: the desktop app attaches after the session starts. */
 export const RESUME_LOG_AFTER_MS = 3000
 export const RECEIPT_MS = 15 * 60 * 1000
 export const HELD_DROP = 'Held by Cache Watch. Choose an option above the prompt box, or send it again to pay.'
+export const COMPACTING_DROP = 'Cache Watch: the cache is cold, so this session compacts first and your message follows.'
 const QUOTE_MAX = 160
 
 export function heldFrom(s: State, text: string): Held {
@@ -580,6 +694,11 @@ export function heldFrom(s: State, text: string): Held {
 /** Whether the send came from someone at a terminal or the desktop app, who sees the card. Remote Control, schedules, notifications and other sessions do not. */
 export function isAttended(origin: PromptOrigin): boolean {
   return origin.kind === 'composer' || origin.kind === 'sdk' || origin.kind === 'unclassified'
+}
+
+/** Whether a person sent this from a phone: over Remote Control, or through the Telegram relay. They see no card, and would wait on it for nothing. */
+export function isRemote(origin: PromptOrigin): boolean {
+  return origin.kind === 'bridge' || (origin.kind === 'plugin' && origin.name === RELAY_PLUGIN)
 }
 
 /** A plugin's resend expands no @file mention and carries no pasted item, so those prompts keep the refuse-once path. */
@@ -715,6 +834,64 @@ async function freshFromResume($: EngineInterface) {
   }
 }
 
+/** The state after a compaction of the main conversation, whoever raised it: `$.session.compact` skips its caller's own hook. */
+async function afterCompact($: EngineInterface, s: State) {
+  await release($)
+  markCompacted(s)
+  s.ctx = 0
+  disarm(s)
+  await arm($, s)
+  await remember($, s)
+}
+
+/**
+ * Compacts between turns. A hook cannot: both calls refuse inside `prompt.submit`, whose turn they would wait on.
+ * An SDK session, as the desktop app runs, has no `$.session.compact`; `/compact` there resolves once it is done, and its
+ * session.compact reaches this mod's hook. A refusal, from JetCompact or the engine, leaves `compacted` false.
+ */
+async function compactNow($: EngineInterface, s: State) {
+  try {
+    const { skip } = await $.session.compact()
+    if (skip === undefined) await afterCompact($, s)
+  } catch {
+    await $.command.run({ command: 'compact' }).catch(() => undefined)
+  }
+}
+
+/** Compacts, then sends what waited for it. Sent whatever the compaction did: a message that vanished would cost more than a cold write. */
+async function compactThenSend($: EngineInterface, s: State, why: string) {
+  const before = s.ctx
+  await compactNow($, s)
+  const texts = s.compacting ?? []
+  s.compacting = null
+  s.ackedAt = 0
+  if (s.compacted) {
+    s.compactedFrom = before
+    s.note = `Compacted from ${fmtTok(before)} tokens first, ${why}.`
+  } else {
+    s.coldWritePending = true
+    s.note = `The compaction was refused, so this paid the whole write ${why}.`
+  }
+  $.ui.log(s.compacted ? `compacted from ${fmtTok(before)} tokens before sending, ${why}.` : `the compaction was refused, so the message went out cold, ${why}.`)
+  for (const text of texts) await $.prompt.submit({ text, asUser: true })
+}
+
+async function compactAndSend($: EngineInterface, s: State) {
+  const h = await read($, held)
+  if (!h) return
+  await release($)
+  if (h.isPreview) return
+  s.compacting = [h.text]
+  await compactThenSend($, s, 'as you chose on the card')
+}
+
+/** Compact from the resume card: nothing is held, so the next message is simply small. */
+async function compactFromResume($: EngineInterface, s: State) {
+  await update($, resumed, () => null)
+  await compactNow($, s)
+  if (!s.compacted) $.ui.toast('cache-watch: the conversation was not compacted.')
+}
+
 /** A surface that never drew the band gets the resume note as the plain line upstream logged. */
 async function resumeFallback($: EngineInterface, s: State, line: string) {
   if (s.hasBand || !(await read($, resumed))) return
@@ -738,11 +915,17 @@ export function freshState(): State {
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null, note: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '',
+    ttlMs: TTL_1H_MS, ttlSource: 'not read yet', windowMs: DEFAULT_WINDOW_MS, alwaysOption: false, cutoffMinutes: null, coldCompact: false, compacting: null, compactedFrom: 0,
   }
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
   const s = freshState()
+  const windowMinutes = Number(options.windowMinutes)
+  if (windowMinutes > 0) s.windowMs = windowMinutes * 60 * 1000
+  s.alwaysOption = options.always === true
+  s.cutoffMinutes = parseCutoff(options.cutoffTime)
+  s.coldCompact = options.coldCompact === true
   let light = false
   let noColor = false
   let footer: FooterMode = 'on'
@@ -815,7 +998,7 @@ export const register: Register = on => {
         ] })
       }
       const statusCard = isOpen ? [Markdown({ key: 'status-card', dimColor: true, text: '```\n' + card(s, now) + '\n```' })] : []
-      const coldFor = h.isPreview ? 'preview, nothing is held' : `cold for ${fmtDuration(now - s.lastRequestAt - TTL_MS)}`
+      const coldFor = h.isPreview ? 'preview, nothing is held' : `cold for ${fmtDuration(now - s.lastRequestAt - s.ttlMs)}`
       const holdCard = compact ? Box({ flexDirection: 'column', borderStyle: 'round', borderColor: 'subtle', paddingX: 1, children: [
         Text({ wrap: 'truncate-end', children: [
           Text({ color: cold, bold: true, children: ['CACHE WATCH'] }),
@@ -834,7 +1017,7 @@ export const register: Register = on => {
             Text({ bold: true, children: ['Your message is on hold'] }),
             Text({ dimColor: true, children: [h.isPreview
               ? 'Preview: nothing is held. Any button closes it.'
-              : `The prompt cache went cold ${fmtDuration(now - s.lastRequestAt - TTL_MS)} ago.`] }),
+              : `The prompt cache went cold ${fmtDuration(now - s.lastRequestAt - s.ttlMs)} ago.`] }),
           ] }),
         ] }),
         stats,
@@ -845,13 +1028,14 @@ export const register: Register = on => {
           ] }),
           Box({ flexDirection: 'row', gap: 1, alignItems: 'center', children: [
             Box({ flexShrink: 0, children: [shield] }),
-            Text({ wrap: 'wrap', children: [`Pay once and keepwarm then holds the cache for ${fmtDuration(holdMs(s))}.`] }),
+            Text({ wrap: 'wrap', children: [`Pay once and keepwarm then holds the cache for ${fmtDuration(holdMs(s, now))}.`] }),
           ] }),
         ] }),
         ...statusCard,
       ] })
       const buttons = Box({ flexDirection: 'row', gap: 2, alignItems: 'center', children: [
         Button({ key: 'pay', label: 'Pay and send', variant: 'primary', onPress: () => { void payAndSend($, s) } }),
+        ...(s.coldCompact ? [Button({ key: 'compact', label: 'Compact and send', onPress: () => { void compactAndSend($, s) } })] : []),
         Button({ key: 'fresh', label: 'Start fresh', onPress: () => { void startFresh($) } }),
         Button({ key: 'status', label: isOpen ? 'Hide cache status' : 'Show cache status', plain: true, onPress: () => { void update($, showStatus, open => !open) } }),
       ] })
@@ -886,7 +1070,7 @@ export const register: Register = on => {
           ] }),
         ] })
       }
-      const coldFor = s.lastRequestAt && isCold(s, now) ? ` · cold for ${fmtDuration(now - s.lastRequestAt - TTL_MS)}` : ''
+      const coldFor = s.lastRequestAt && isCold(s, now) ? ` · cold for ${fmtDuration(now - s.lastRequestAt - s.ttlMs)}` : ''
       notice.push(
         Box({ key: 'resume', flexDirection: 'column', borderStyle: 'round', borderColor: 'subtle', paddingX: 1, children: [
           Text({ wrap: 'truncate-end', children: [
@@ -899,6 +1083,7 @@ export const register: Register = on => {
           Text({ wrap: 'wrap', children: [RESUME_TIP] }),
         ] }),
         Box({ key: 'resume-buttons', flexDirection: 'row', gap: 2, alignItems: 'center', children: [
+          ...(s.coldCompact ? [Button({ key: 'resume-compact', label: 'Compact', onPress: () => { void compactFromResume($, s) } })] : []),
           Button({ key: 'resume-fresh', label: 'Start fresh', onPress: () => { void freshFromResume($) } }),
           Button({ key: 'resume-dismiss', label: 'Dismiss', plain: true, onPress: () => { void update($, resumed, () => null) } }),
         ] }),
@@ -982,31 +1167,33 @@ export const register: Register = on => {
     light = typeof theme === 'string' && theme.startsWith('light')
     noColor = Boolean(await $.env.get('NO_COLOR'))
     if (s.hasBand) $.ui.status(undefined)
+    await readTtl($, s)
+    restore(s, await read($, snapshot), await $.session.id())
     const now = await seat($, s)
     await prune($, s, now)
     const saved = await $.store.get(deadlineKey(s))
     const savedEvery = await $.store.get(everyKey(s))
     const savedGuard = await $.store.get(KEY_GUARD)
     s.deadline = typeof saved === 'number' && saved > now ? saved : 0
-    s.every = typeof savedEvery === 'number' && savedEvery >= MIN_PING_MS && savedEvery < TTL_MS ? savedEvery : PING_AFTER_MS
+    s.every = typeof savedEvery === 'number' && savedEvery >= MIN_PING_MS && savedEvery < s.ttlMs ? savedEvery : PING_AFTER_MS
     s.guard = savedGuard === 'warn' ? 'warn' : 'refuse'
-    s.always = (await $.store.get(KEY_ALWAYS)) === true
+    s.always = await readAlways($, s)
     const savedFooter = await $.store.get(KEY_FOOTER)
     footer = savedFooter === 'off' ? 'off' : 'on'
     // Always means a fresh default window every session, whatever the last one left behind.
-    if (s.always) await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
+    if (s.always) await armAlways($, s, now)
     // The classic start arms a restored window too, but a managed plugin above this tier may continue beneath it; arming twice leaves one timer.
     else if (s.deadline) await arm($, s)
     await $.command.register({
       name: 'keepwarm',
-      description: 'Keep the prompt cache warm: bare for 6h, a window such as 90m, always, off, or status (cache-watch)',
-      argumentHint: '[6h | always | off | status]',
+      description: `Keep the prompt cache warm: bare for ${fmtDuration(s.windowMs)}, a window such as 90m, always, off, or status (cache-watch)`,
+      argumentHint: '[90m | always | off | status]',
       immediate: true,
     })
     await $.command.register({
       name: 'cache-watch',
       description: 'Prompt cache state, cold price and this session\'s cold writes; guard warn|refuse (cache-watch, the Mod)',
-      argumentHint: '[status | preview | pay | fresh | dismiss | guard warn | guard refuse | footer on|off]',
+      argumentHint: '[status | preview | pay | compact | fresh | dismiss | guard warn | guard refuse | footer on|off]',
       immediate: true,
     })
     // The hook form of cache-tax ships a /cache-tax:status skill; both installed means two guards.
@@ -1050,6 +1237,7 @@ export const register: Register = on => {
       // The resume note already showed this cold spell's price, so the first send goes straight through, never held.
       s.ackedAt = s.lastRequestAt
     }
+    await remember($, s)
     // The seeded clock decides whether a restored or always window pings before the first turn: never when it is cold.
     await arm($, s)
     return r
@@ -1067,13 +1255,13 @@ export const register: Register = on => {
     if (words[0] === 'always') {
       s.always = true
       await $.store.set(KEY_ALWAYS, true)
-      await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
+      await armAlways($, s, now)
       const cold = isCold(s, now) ? `. The cache is cold now, so the first ping comes ${fmtDuration(s.every)} after the next turn` : ''
-      return { text: `keepwarm always on: every session stays warm until ${fmtDuration(DEFAULT_WINDOW_MS)} after its last turn; /keepwarm off turns it off for good${cold}` }
+      return { text: `keepwarm always on: every session stays warm until ${fmtDuration(s.windowMs)} after its last turn; /keepwarm off turns it off for good${cold}` }
     }
     if (!words.length) {
-      await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
-      return { text: armedText(s, now, DEFAULT_WINDOW_MS) }
+      await startWindow($, s, s.windowMs, PING_AFTER_MS)
+      return { text: armedText(s, now, s.windowMs) }
     }
     if (words[0] !== 'status') {
       const window = parseDuration(words[0])
@@ -1083,12 +1271,12 @@ export const register: Register = on => {
       if (words[1] === 'every') {
         const period = parseDuration(words[2] ?? '')
         // A period of the cache's whole hour or more would fire only once the cache is already cold.
-        if (period == null || period < MIN_PING_MS || period >= TTL_MS) return { text: 'every takes a period from 1m to 59m' }
+        if (period == null || period < MIN_PING_MS || period >= s.ttlMs) return { text: 'every takes a period from 1m to 59m' }
         every = period
       }
       await startWindow($, s, window, every)
-      const rolls = s.always && (window < DEFAULT_WINDOW_MS || every !== PING_AFTER_MS)
-      return { text: armedText(s, now, window) + (rolls ? `. Always is on, so your next turn makes it at least ${fmtDuration(DEFAULT_WINDOW_MS)} at one ping per ${fmtDuration(PING_AFTER_MS)}` : '') }
+      const rolls = s.always && (window < s.windowMs || every !== PING_AFTER_MS)
+      return { text: armedText(s, now, window) + (rolls ? `. Always is on, so your next turn makes it at least ${fmtDuration(s.windowMs)} at one ping per ${fmtDuration(PING_AFTER_MS)}` : '') }
     }
     return { text: statusText(s, now) ?? 'keepwarm is off' }
   })
@@ -1102,6 +1290,14 @@ export const register: Register = on => {
       // The resume card's Start fresh: nothing held, so it only clears, once this dispatch returns.
       $.clock.after(0, () => { void freshFromResume($) })
       return { text: 'cache-watch: starting fresh' }
+    }
+    if (words[0] === 'compact') {
+      if (!s.coldCompact) return { text: 'cache-watch: compacting a cold send is off (the coldCompact option)' }
+      const h = await read($, held)
+      if (!h && !(await read($, resumed))) return { text: 'cache-watch: no message is on hold' }
+      // Compacting waits on this dispatch, so it starts once the command returns.
+      $.clock.after(0, () => { void (h ? compactAndSend($, s) : compactFromResume($, s)) })
+      return { text: h ? 'cache-watch: compacting, then the held message goes out' : 'cache-watch: compacting' }
     }
     if (words[0] === 'dismiss') {
       if (!(await read($, resumed))) return { text: 'cache-watch: nothing to dismiss' }
@@ -1145,7 +1341,7 @@ export const register: Register = on => {
 
   // The message that pays. Only its first character is read.
   on('prompt.submit', async ($, e, next) => {
-    if (e.origin.kind === 'plugin') return next(e)
+    if (e.origin.kind === 'plugin' && !isRemote(e.origin)) return next(e)
     await reseat($, s)
     // The person moved on: the last receipt has been seen.
     if (await read($, receipt)) await update($, receipt, () => null)
@@ -1164,7 +1360,18 @@ export const register: Register = on => {
       if (cold && s.ctx >= BIG_TOKENS) $.ui.log(unknownText(s))
       return next(e)
     }
+    // A message that comes in while a compaction runs goes out after it, in order.
+    if (s.compacting) {
+      s.compacting.push(e.text)
+      return { drop: COMPACTING_DROP }
+    }
     if (!isCold(s, now) || s.ctx < BIG_TOKENS) return next(e)
+    // Nobody at a phone can choose on a card, so the cheap way out is taken for them. Only a timer can compact.
+    if (s.coldCompact && isRemote(e.origin) && canHold(e.text, e.attachments)) {
+      s.compacting = [e.text]
+      $.clock.after(0, () => { void compactThenSend($, s, 'because it came from a remote session') })
+      return { drop: COMPACTING_DROP }
+    }
     if (s.ackedAt === s.lastRequestAt) {
       s.ackedAt = 0
       s.coldWritePending = true
@@ -1173,17 +1380,17 @@ export const register: Register = on => {
     }
     if (s.guard === 'warn') {
       if (s.hasBand) s.note = 'Your message went straight through, because the guard is set to warn.'
-      else $.ui.log(`${guardText(s, now)} Sending anyway; keepwarm will hold the cache for ${fmtDuration(holdMs(s))} once it lands.`)
+      else $.ui.log(`${guardText(s, now)} Sending anyway; keepwarm will hold the cache for ${fmtDuration(holdMs(s, now))} once it lands.`)
       s.coldWritePending = true
       await release($)
       return next(e)
     }
     if (!isAttended(e.origin)) {
       // The card's buttons draw on the terminal and the desktop app only: a phone, a schedule or another session could never press them.
-      if (s.hasBand) s.note = e.origin.kind === 'bridge'
-        ? 'Your message went straight through, because it came over Remote Control, where the card can\'t show.'
+      if (s.hasBand) s.note = isRemote(e.origin)
+        ? 'Your message went straight through, because it came from a remote session, where the card can\'t show.'
         : 'Your message went straight through, because no one was at the prompt to choose on the card.'
-      else $.ui.log(`${guardText(s, now)} Sending anyway, because no one at this prompt sent it; keepwarm will hold the cache for ${fmtDuration(holdMs(s))} once it lands.`)
+      else $.ui.log(`${guardText(s, now)} Sending anyway, because no one at this prompt sent it; keepwarm will hold the cache for ${fmtDuration(holdMs(s, now))} once it lands.`)
       s.coldWritePending = true
       await release($)
       return next(e)
@@ -1201,7 +1408,7 @@ export const register: Register = on => {
       await update($, showStatus, () => false)
       return { drop: HELD_DROP }
     }
-    return { drop: `cache-watch: ${guardText(s, now)} Send it again to pay it, and keepwarm will then hold the cache for ${fmtDuration(holdMs(s))}. Or /clear and start from a note.` }
+    return { drop: `cache-watch: ${guardText(s, now)} Send it again to pay it, and keepwarm will then hold the cache for ${fmtDuration(holdMs(s, now))}. Or /clear and start from a note.` }
   })
 
   on('turn.step', async function* ($, e, next) {
@@ -1249,14 +1456,14 @@ export const register: Register = on => {
     if (s.lastRequestAt) s.resumedAt = 0
     s.waitForTurn = false
     s.ackedAt = 0
-    // Always covers any break up to six hours after a turn that reached the cache (a turn that failed before any
-    // response touched nothing, and its cache may be cold): a window of at least six hours at the default period,
+    // Always covers any break up to the default window after a turn that reached the cache (a turn that failed before any
+    // response touched nothing, and its cache may be cold): a window at least that long at the default period,
     // which brings back a stopped window and replaces a shorter one or a testing period. Another session's
     // /keepwarm off or /keepwarm always changes the shared switch, so every such turn reads it.
     if (e.usage) {
-      const shared = (await $.store.get(KEY_ALWAYS)) === true
+      const shared = await readAlways($, s)
       if (s.offs === offs) s.always = shared
-      if (s.always) await startWindow($, s, Math.max(DEFAULT_WINDOW_MS, s.deadline - now), PING_AFTER_MS, offs)
+      if (s.always) await armAlways($, s, now, offs)
     }
     const u = e.usage
     if (u) {
@@ -1279,21 +1486,30 @@ export const register: Register = on => {
         const price = priceOf(s.lastModel, prev || s.ctx)
         const usd = writes?.priced ? writes.usd : price ? write * price[1] / 1e6 : null
         s.misses.push({ at: now, tokens: write, usd })
-        const extend = s.deadline < now + AUTO_WARM_MS && s.offs === offs
-        if (extend) await startWindow($, s, AUTO_WARM_MS, s.every, offs)
+        const hold = autoWindow(s, now, AUTO_WARM_MS)
+        const extend = hold > 0 && s.deadline < now + hold && s.offs === offs
+        if (extend) await startWindow($, s, hold, s.every, offs)
         if (s.hasBand) {
-          const paid: Receipt = { tokens: write, usd, at: now, warmForMs: extend ? AUTO_WARM_MS : 0, note: s.note }
+          const paid: Receipt = { tokens: write, usd, at: now, warmForMs: extend ? hold : 0, note: s.note }
           await update($, receipt, () => paid)
         } else {
           $.ui.log(`cold write of ${fmtTok(write)} tokens paid (${fmtUsd(usd)}).` +
-            (extend ? ` Keeping the cache warm for ${fmtDuration(AUTO_WARM_MS)} so it is not paid again today; /keepwarm off to stop.` : ''))
+            (extend ? ` Keeping the cache warm for ${fmtDuration(hold)} so it is not paid again today; /keepwarm off to stop.` : ''))
         }
       }
+      // The send a compaction went ahead of: what it cost instead, for the person back at the desk.
+      if (s.compactedFrom && s.hasBand) {
+        const price = priceOf(s.lastModel, s.ctx)
+        const paid: Receipt = { tokens: written, usd: price ? written * price[1] / 1e6 : null, at: now, warmForMs: 0, note: s.note }
+        await update($, receipt, () => paid)
+      }
     }
+    s.compactedFrom = 0
     s.coldWritePending = false
     s.note = null
     s.stepWrites = null
     s.steps = 0
+    await remember($, s)
     await arm($, s)
     // arm() redraws only while keepwarm is on; the cache clock restarts on every turn either way.
     if (!s.deadline) updateStatus($, s, now)
@@ -1302,13 +1518,23 @@ export const register: Register = on => {
 
   on('session.compact', async ($, e, next) => {
     const r = await next(e)
-    if (!e.agentId) {
-      await release($)
-      markCompacted(s)
-      // Between turns nothing is left to score, and the next turn's summary write is not a cold write.
-      s.ctx = 0
-      disarm(s)
+    // A precompute installs nothing, and a skip leaves the conversation as it was: the cache and its clock stand.
+    // Between turns nothing is left to score, and the next turn's summary write is not a cold write.
+    if (!e.agentId && e.trigger !== 'precompute' && r.skip === undefined) await afterCompact($, s)
+    return r
+  })
+
+  // The new model has a cached prefix of its own: nothing is known about it until a turn, and a ping would pay its whole write.
+  on('classic.PostModelSwitch', async ($, e, next) => {
+    const r = await next(e)
+    s.lastModel = e.to_model
+    s.ttlMs = e.cache_ttl === '5m' ? TTL_5M_MS : TTL_1H_MS
+    s.ttlSource = 'the model switch'
+    if (!e.prompt_cache_warm) {
+      s.lastRequestAt = 0
+      outdate(s)
       await arm($, s)
+      await remember($, s)
     }
     return r
   })
