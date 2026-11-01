@@ -1048,9 +1048,13 @@ export const register: Register = (on, options) => {
     if (!s.hasBand || e.props.hasSurvey) return rest
     // The desktop draws its close control at the band's top right only for this shape: a row of one Box and
     // the Button, on a row that has nothing but flexDirection and gap. Any other shape leaves a labelled button.
-    const closable = (children: RenderElement[], close: RenderElement, gap = 0) => {
+    // The gap stays among the cards: beside an empty `rest` it would push them down from the band's top.
+    const closable = (cards: RenderElement[], close: RenderElement, gap = 0) => {
       const { Box } = $.ui.resolve(e)
-      return Box({ flexDirection: 'row', gap: 1, children: [Box({ flexDirection: 'column', flexGrow: 1, gap, children }), close] })
+      return Box({ flexDirection: 'row', gap: 1, children: [
+        Box({ flexDirection: 'column', flexGrow: 1, children: [rest, Box({ flexDirection: 'column', gap, children: cards })] }),
+        close,
+      ] })
     }
     const now = await $.clock.now()
     const h = await read($, held)
@@ -1144,7 +1148,7 @@ export const register: Register = (on, options) => {
         Button({ key: 'status', label: isOpen ? 'Hide cache status' : 'Show cache status', plain: true, onPress: () => { void update($, showStatus, open => !open) } }),
         ...(e.surface === 'desktop' ? [] : [close]),
       ] })
-      if (e.surface === 'desktop') return closable([rest, holdCard, buttons], close, compact ? 0 : 1)
+      if (e.surface === 'desktop') return closable([holdCard, buttons], close, compact ? 0 : 1)
       return Box({ flexDirection: 'column', gap: compact ? 0 : 1, children: [rest, holdCard, buttons] })
     }
     // A cold resume's note, styled like the compact hold card, in place of a transcript line no hook can restyle.
@@ -1205,9 +1209,9 @@ export const register: Register = (on, options) => {
       if (closesNote) void update($, resumed, () => null)
       void update($, receipt, () => null)
     } })
-    const band = (children: RenderElement[], gap = 0) => closesNote || !noPill ? closable(children, dismiss(), gap)
-      : $.ui.resolve(e).Box({ flexDirection: 'column', gap, children })
-    if (noRow && noPill) return notice.length ? band([rest, ...notice]) : rest
+    const band = (cards: RenderElement[], gap = 0) => closesNote || !noPill ? closable(cards, dismiss(), gap)
+      : $.ui.resolve(e).Box({ flexDirection: 'column', children: [rest, ...cards] })
+    if (noRow && noPill) return notice.length ? band(notice) : rest
     const state = s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
     const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined
     const { Box, Text } = $.ui.resolve(e)
@@ -1228,7 +1232,7 @@ export const register: Register = (on, options) => {
       ] }),
     ] })
     const rows = noRow || (footer === 'on' && footerSeen.surface === e.surface) ? [] : [row]
-    if (noPill) return rows.length || notice.length ? band([rest, ...notice, ...rows]) : rest
+    if (noPill) return rows.length || notice.length ? band([...notice, ...rows]) : rest
     // The paid write as a pill under the row: what the log line said, drawn where it can be styled.
     const shield = e.surface === 'desktop' ? $.ui.resolve(e).Svg({ source: shieldSvg(light), width: 16, height: 16, alt: 'Paid' })
       : Text({ color: noColor ? undefined : 'success', children: ['✓'] })
@@ -1240,7 +1244,7 @@ export const register: Register = (on, options) => {
         ...(paid.warmForMs > 0 ? [Text({ dimColor: true, children: [' /keepwarm off to stop'] })] : []),
       ] }),
     ] })
-    return band([rest, ...notice, pill, ...rows], 1)
+    return band([...notice, pill, ...rows], 1)
   })
 
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {

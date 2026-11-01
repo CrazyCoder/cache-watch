@@ -1092,8 +1092,8 @@ describe('hold card', () => {
     await clock.advance(3 * HOUR)
     await $.prompt.submit(prompt('held'))
     const ui = await $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'AbovePrompt', props: tallBand })
-    const shape = (tree: any) => [tree.type, Object.keys(tree.props ?? {}).sort().join(), tree.children.map((c: any) => c.type).join(), tree.children.at(-1).props.role]
-    const closable = ['Box', 'flexDirection,gap', 'Box,Button', 'dismiss']
+    const shape = (tree: any) => [tree.type, Object.keys(tree.props ?? {}).sort().join(), tree.children.map((c: any) => c.type).join(), tree.children.at(-1).props.role, 'gap' in tree.children[0].props]
+    const closable = ['Box', 'flexDirection,gap', 'Box,Button', 'dismiss', false]
     expect(shape(await ui.drawn())).toEqual(closable)
     await ui.press({ key: 'close' })
     expect(await isHeld(ui)).toBe(false)
