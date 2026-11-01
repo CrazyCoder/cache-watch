@@ -1209,8 +1209,8 @@ export const register: Register = (on, options) => {
       if (closesNote) void update($, resumed, () => null)
       void update($, receipt, () => null)
     } })
-    const band = (cards: RenderElement[], gap = 0) => closesNote || !noPill ? closable(cards, dismiss(), gap)
-      : $.ui.resolve(e).Box({ flexDirection: 'column', children: [rest, ...cards] })
+    const band = (cards: RenderElement[], gap = 0) => e.surface === 'desktop' && (closesNote || !noPill) ? closable(cards, dismiss(), gap)
+      : $.ui.resolve(e).Box({ flexDirection: 'column', gap, children: [rest, ...cards] })
     if (noRow && noPill) return notice.length ? band(notice) : rest
     const state = s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
     const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined
@@ -1244,7 +1244,8 @@ export const register: Register = (on, options) => {
         ...(paid.warmForMs > 0 ? [Text({ dimColor: true, children: [' /keepwarm off to stop'] })] : []),
       ] }),
     ] })
-    return band([...notice, pill, ...rows], 1)
+    const closablePill = e.surface === 'desktop' ? pill : Box({ flexDirection: 'row', gap: 1, alignItems: 'center', children: [pill, dismiss()] })
+    return band([...notice, closablePill, ...rows], 1)
   })
 
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
