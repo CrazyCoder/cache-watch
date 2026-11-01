@@ -1083,6 +1083,45 @@ describe('hold card', () => {
     expect((await ui.find({ type: 'Text', text: 'cache-watch' }))?.text).toMatch(/warm.*goes cold in 1h00m/)
   })
 
+  test('every desktop card draws as a row of one Box and a dismiss Button, the shape that gets the close control', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [])
+    on('prompt.fill', () => ({ isFilled: true }))
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('held'))
+    const ui = await $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'AbovePrompt', props: tallBand })
+    const shape = (tree: any) => [tree.type, Object.keys(tree.props ?? {}).sort().join(), tree.children.map((c: any) => c.type).join(), tree.children.at(-1).props.role]
+    const closable = ['Box', 'flexDirection,gap', 'Box,Button', 'dismiss']
+    expect(shape(await ui.drawn())).toEqual(closable)
+    await ui.press({ key: 'close' })
+    expect(await isHeld(ui)).toBe(false)
+    await $.command.run(run('cache-watch', 'preview receipt'))
+    expect(shape(await ui.drawn())).toEqual(closable)
+    await ui.press({ key: 'receipt-dismiss' })
+    expect(await ui.find({ text: /Cold write paid/ })).toBeUndefined()
+    await $.command.run(run('cache-watch', 'preview resume'))
+    expect(shape(await ui.drawn())).toEqual(closable)
+    await $.command.run(run('cache-watch', 'preview receipt'))
+    await ui.press({ key: 'resume-dismiss' })
+    expect(await ui.find({ text: /Resuming a cold chat|Cold write paid/ })).toBeUndefined()
+  })
+
+  test('a terminal keeps the labelled buttons where they stand', async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [])
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.turn.complete(turn())
+    await $.command.run(run('cache-watch', 'preview receipt'))
+    const ui = await $.ui.mount({ plugin: 'cache-watch', surface: 'terminal', component: 'AbovePrompt', props: tallBand })
+    await ui.press({ key: 'receipt-dismiss' })
+    expect(await ui.find({ text: /Cold write paid/ })).toBeUndefined()
+    await $.command.run(run('cache-watch', 'preview resume'))
+    await ui.press({ key: 'resume-dismiss' })
+    expect(await ui.find({ text: /Resuming a cold chat/ })).toBeUndefined()
+  })
+
   test('/cache-watch preview shows the card with this session\'s numbers, and any button only closes it', async ($, on) => {
     mock.clock(on, { now: START })
     const w = world(on, [])

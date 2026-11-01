@@ -701,6 +701,8 @@ export function restore(s: State, saved: Snapshot | null, sid: string) {
 /** How long a cold resume waits for a band before it logs its plain line instead: the desktop app attaches after the session starts. */
 export const RESUME_LOG_AFTER_MS = 3000
 export const RECEIPT_MS = 15 * 60 * 1000
+/** What the desktop's close control takes from the width of a card beside it. */
+const CLOSE_PX = 40
 export const HELD_DROP = 'Held by Cache Watch. Choose an option above the prompt box, or send it again to pay.'
 export const COMPACT_WAIT_MS = 2 * 60 * 1000
 const PREVIEW_TOKENS = 400000
@@ -1044,6 +1046,12 @@ export const register: Register = (on, options) => {
       $.clock.after(0, () => { $.ui.status(undefined) })
     }
     if (!s.hasBand || e.props.hasSurvey) return rest
+    // The desktop draws its close control at the band's top right only for this shape: a row of one Box and
+    // the Button, on a row that has nothing but flexDirection and gap. Any other shape leaves a labelled button.
+    const closable = (children: RenderElement[], close: RenderElement, gap = 0) => {
+      const { Box } = $.ui.resolve(e)
+      return Box({ flexDirection: 'row', gap: 1, children: [Box({ flexDirection: 'column', flexGrow: 1, gap, children }), close] })
+    }
     const now = await $.clock.now()
     const h = await read($, held)
     if (h) {
@@ -1066,11 +1074,11 @@ export const register: Register = (on, options) => {
       let stats
       if (e.surface === 'desktop' && !compact) {
         // An Svg without width and height keeps a 300 by 150 frame (nakadadev). About 8 px per column, less the card's padding.
-        const width = Math.max(320, Math.min(680, e.props.bodyColumns * 8 - 48))
+        const width = Math.max(320, Math.min(680, e.props.bodyColumns * 8 - 48 - CLOSE_PX))
         stats = $.ui.resolve(e).Svg({ source: statsSvg(h, light), alt: statsAlt(h), width, height: Math.round(width * 132 / 680) })
       } else if (e.surface === 'desktop') {
         // Compact on the desktop: two thin bars in one short Svg, never block glyphs in proportional Text.
-        const width = Math.max(280, Math.min(680, e.props.bodyColumns * 8 - 32))
+        const width = Math.max(280, Math.min(680, e.props.bodyColumns * 8 - 32 - CLOSE_PX))
         stats = $.ui.resolve(e).Svg({ source: compactStatsSvg(h, light, width), alt: statsAlt(h), width, height: 44 })
       } else {
         const cells = Math.max(6, Math.min(24, Math.floor((e.props.bodyColumns - 40) / 2)))
@@ -1127,14 +1135,16 @@ export const register: Register = (on, options) => {
         ] }),
         ...statusCard,
       ] })
+      const close = Button({ key: 'close', label: 'Close', role: 'dismiss', plain: true, onPress: () => { void closeCard($, s) } })
       // Desktop buttons stand taller than a text row and ride up over the card without a margin; a gap on the column would also push the card down from the empty `rest`.
       const buttons = Box({ flexDirection: 'row', gap: 2, alignItems: 'center', marginTop: compact && e.surface === 'desktop' ? 1 : 0, children: [
         Button({ key: 'pay', label: 'Pay and send', variant: 'primary', onPress: () => { void payAndSend($, s) } }),
         ...(s.coldCompact ? [Button({ key: 'compact', label: 'Compact and send', onPress: () => { void compactAndSend($, s) } })] : []),
         Button({ key: 'fresh', label: 'Start fresh', onPress: () => { void startFresh($) } }),
         Button({ key: 'status', label: isOpen ? 'Hide cache status' : 'Show cache status', plain: true, onPress: () => { void update($, showStatus, open => !open) } }),
-        Button({ key: 'close', label: 'Close', plain: true, onPress: () => { void closeCard($, s) } }),
+        ...(e.surface === 'desktop' ? [] : [close]),
       ] })
+      if (e.surface === 'desktop') return closable([rest, holdCard, buttons], close, compact ? 0 : 1)
       return Box({ flexDirection: 'column', gap: compact ? 0 : 1, children: [rest, holdCard, buttons] })
     }
     // A cold resume's note, styled like the compact hold card, in place of a transcript line no hook can restyle.
@@ -1145,7 +1155,7 @@ export const register: Register = (on, options) => {
       const figures: Held = { ...note, text: '' }
       let stats
       if (e.surface === 'desktop') {
-        const width = Math.max(280, Math.min(680, e.props.bodyColumns * 8 - 32))
+        const width = Math.max(280, Math.min(680, e.props.bodyColumns * 8 - 32 - CLOSE_PX))
         stats = $.ui.resolve(e).Svg({ source: compactStatsSvg(figures, light, width), alt: statsAlt(figures), width, height: 44 })
       } else {
         const cells = Math.max(6, Math.min(24, Math.floor((e.props.bodyColumns - 40) / 2)))
@@ -1181,7 +1191,7 @@ export const register: Register = (on, options) => {
         Box({ key: 'resume-buttons', flexDirection: 'row', gap: 2, alignItems: 'center', marginTop: e.surface === 'desktop' ? 1 : 0, children: [
           ...(s.coldCompact ? [Button({ key: 'resume-compact', label: 'Compact', onPress: () => { void compactFromResume($, s) } })] : []),
           Button({ key: 'resume-fresh', label: 'Start fresh', onPress: () => { void freshFromResume($) } }),
-          Button({ key: 'resume-dismiss', label: 'Dismiss', plain: true, onPress: () => { void update($, resumed, () => null) } }),
+          ...(e.surface === 'desktop' ? [] : [Button({ key: 'resume-dismiss', label: 'Dismiss', plain: true, onPress: () => { void update($, resumed, () => null) } })]),
         ] }),
       )
     }
@@ -1189,7 +1199,15 @@ export const register: Register = (on, options) => {
     const noRow = !text || (s.deadline && now >= s.deadline)
     const paid = await read($, receipt)
     const noPill = !paid || now - paid.at >= RECEIPT_MS
-    if (noRow && noPill) return notice.length ? $.ui.resolve(e).Box({ flexDirection: 'column', children: [rest, ...notice] }) : rest
+    // One close control a band: on the desktop it takes the resume card along with the receipt.
+    const closesNote = e.surface === 'desktop' && note !== null
+    const dismiss = () => $.ui.resolve(e).Button({ key: closesNote ? 'resume-dismiss' : 'receipt-dismiss', label: 'Dismiss', role: 'dismiss', plain: true, onPress: () => {
+      if (closesNote) void update($, resumed, () => null)
+      void update($, receipt, () => null)
+    } })
+    const band = (children: RenderElement[], gap = 0) => closesNote || !noPill ? closable(children, dismiss(), gap)
+      : $.ui.resolve(e).Box({ flexDirection: 'column', gap, children })
+    if (noRow && noPill) return notice.length ? band([rest, ...notice]) : rest
     const state = s.stopped ? 'stopped' : !s.lastRequestAt || s.compacted ? 'unknown' : isCold(s, now) ? 'cold' : 'warm'
     const color = noColor ? undefined : state === 'warm' ? 'success' : state === 'cold' ? (light ? '#c15f3c' : '#d97757') : undefined
     const { Box, Text } = $.ui.resolve(e)
@@ -1210,7 +1228,7 @@ export const register: Register = (on, options) => {
       ] }),
     ] })
     const rows = noRow || (footer === 'on' && footerSeen.surface === e.surface) ? [] : [row]
-    if (noPill) return rows.length || notice.length ? Box({ flexDirection: 'column', children: [rest, ...notice, ...rows] }) : rest
+    if (noPill) return rows.length || notice.length ? band([rest, ...notice, ...rows]) : rest
     // The paid write as a pill under the row: what the log line said, drawn where it can be styled.
     const shield = e.surface === 'desktop' ? $.ui.resolve(e).Svg({ source: shieldSvg(light), width: 16, height: 16, alt: 'Paid' })
       : Text({ color: noColor ? undefined : 'success', children: ['✓'] })
@@ -1222,7 +1240,7 @@ export const register: Register = (on, options) => {
         ...(paid.warmForMs > 0 ? [Text({ dimColor: true, children: [' /keepwarm off to stop'] })] : []),
       ] }),
     ] })
-    return Box({ flexDirection: 'column', gap: 1, children: [rest, ...notice, pill, ...rows] })
+    return band([rest, ...notice, pill, ...rows], 1)
   })
 
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {

@@ -84,7 +84,7 @@ The status row above the prompt box, used when the footer is off or hasn't drawn
 | Send it now | The re-write price, its token count and the cache-write rate. |
 | A warm turn | What the same turn would have cost with the cache warm. |
 | On hold | Your message, cut at 160 characters. |
-| Buttons | **Pay and send**, **Compact and send** (with the `coldCompact` option), **Start fresh**, **Show cache status**, **Close**. |
+| Buttons | **Pay and send**, **Compact and send** (with the `coldCompact` option), **Start fresh**, **Show cache status**, **Close**. The desktop app draws Close as a cross at the top right. |
 
 When the band above the prompt has fewer rows than the full card needs (24 in the desktop app, 18 in a terminal), the card turns compact: a one-line header and thin bars, with the buttons still in view.
 
@@ -98,13 +98,13 @@ Opening an old chat whose cache Claude Code reports as likely expired, with 50,0
 | Send it now | What your first message will cost to re-write the cache. This is Claude Code's own estimate when the resume carries one, and the rate shown is worked out from it. |
 | A warm turn | What the same turn would cost with the cache warm. |
 | Tip | "A cold cache means the AI has to re-read everything in the session all over again. If the juice isn't worth the squeeze, consider starting a fresh chat." |
-| Buttons | **Compact** compacts the conversation, with the `coldCompact` option. **Start fresh** runs `/clear`. **Dismiss** closes the card. |
+| Buttons | **Compact** compacts the conversation, with the `coldCompact` option. **Start fresh** runs `/clear`. **Dismiss** closes the card; the desktop app draws it as a cross at the top right. |
 
 The card goes when you send a message, run `/clear`, or press either button. Your first message after it goes straight through, never held, because the card already showed you the price. The same goes for the plain line. Where no band draws, such as the VS Code panel, cache-watch logs a one-line version in the chat instead, 3 seconds after the session resumes.
 
 ## The receipt pill
 
-After a paid cold write, a receipt pill above the prompt box says what the write cost and how long keepwarm now holds the cache. After a send that compacted first, it says what the smaller write cost and from what size the conversation was compacted. It goes at your next message, or after 15 minutes.
+After a paid cold write, a receipt pill above the prompt box says what the write cost and how long keepwarm now holds the cache. After a send that compacted first, it says what the smaller write cost and from what size the conversation was compacted. It goes at your next message, after 15 minutes, or when you press **Dismiss**, a cross at the top right in the desktop app.
 
 ## Settings and environment
 
