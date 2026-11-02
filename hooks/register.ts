@@ -1255,7 +1255,8 @@ export const register: Register = (on, options) => {
     ] })
     const closablePill = e.surface === 'desktop' ? pill : Box({ flexDirection: 'row', gap: 1, alignItems: 'center', children: [pill, dismiss()] })
     return band([...notice, closablePill, ...rows], 1)
-  })
+    // A throw draws what the mods beneath drew, never an empty band.
+  }).catch(($, e, next) => next(e).catch(() => undefined))
 
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     // The band drew before the footer's first draw here, so redraw it once without its row.

@@ -1126,6 +1126,18 @@ describe('hold card', () => {
     expect(await ui.find({ text: /another mod/ })).toBeUndefined()
   })
 
+  test('a band that throws while drawn leaves another mod\'s card in place', async ($, on) => {
+    let isBroken = false
+    // A clock that fails makes the band's own code throw after next(e).
+    on('clock.now', () => { if (isBroken) throw new Error('broken clock'); return { value: START } })
+    world(on, [], { bandText: 'another mod' })
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
+    await $.turn.complete(turn())
+    isBroken = true
+    const ui = await $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'AbovePrompt', props: tallBand })
+    expect((await ui.find({ text: /^another mod$/ }))?.text).toBe('another mod')
+  })
+
   test('a terminal stacks its cards under another mod\'s', async ($, on) => {
     mock.clock(on, { now: START })
     world(on, [], { bandText: 'another mod' })
