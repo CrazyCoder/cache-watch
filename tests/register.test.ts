@@ -3,7 +3,7 @@ import type { Plugin, TestBody } from 'claude-code/testing'
 import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
-import { COMPACTING_DROP, COMPACT_WAIT_MS, HELD_DROP, RESUME_LOG_AFTER_MS, autoWindow, bar, canHold, compactStatsSvg, fmtDuration, footerLabel, freshState, isRemote, parseCutoff, parseDuration, quoted, resetForClear, resolveTtl, restore, resumeNoteFrom, seedFromResume, statsSvg, warmShare } from '../hooks/register'
+import { COMPACTING_DROP, COMPACT_WAIT_MS, HELD_DROP, RESUME_LOG_AFTER_MS, autoWindow, bar, canHold, compactStatsSvg, fmtDuration, footerLabel, freshState, isBlank, isRemote, parseCutoff, parseDuration, quoted, resetForClear, resolveTtl, restore, resumeNoteFrom, seedFromResume, statsSvg, warmShare } from '../hooks/register'
 
 tier('user')
 
@@ -183,7 +183,8 @@ describe('cache indicator', () => {
   for (const surface of ['terminal', 'desktop'] as const) {
     test(`${surface}: unknown, warm, cold and warm again agree with the card`, async ($, on) => {
       const clock = mock.clock(on, { now: 10 * HOUR })
-      const w = world(on, [nothing], { bandText: 'other mod' })
+      // The desktop band gives way to another mod's card, so only the terminal draws one beneath.
+      const w = world(on, [nothing], { bandText: surface === 'terminal' ? 'other mod' : undefined })
       await $.session.start({ ...session, surface, isInteractive: true })
       const ui = await $.ui.mount({ plugin: 'cache-watch', surface, component: 'AbovePrompt', props: bandProps })
       expect(await ui.find({ text: 'cache-watch' })).toBe(undefined)
@@ -198,7 +199,7 @@ describe('cache indicator', () => {
       expect((await ui.find({ type: 'Text', text: 'cache-watch' }))?.text).toMatch(/cold.*cold now/)
       expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/state       COLD/)
       expect(w.forks.length).toBe(1)
-      expect((await ui.find({ text: /^other mod$/ }))?.text).toBe('other mod')
+      if (surface === 'terminal') expect((await ui.find({ text: /^other mod$/ }))?.text).toBe('other mod')
       await $.turn.complete(turn())
       expect((await ui.find({ type: 'Text', text: /^(warm|cold|unknown|stopped)$/ }))?.props.color).toBe('success')
       expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/state       warm/)
@@ -1092,8 +1093,8 @@ describe('hold card', () => {
     await clock.advance(3 * HOUR)
     await $.prompt.submit(prompt('held'))
     const ui = await $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'AbovePrompt', props: tallBand })
-    const shape = (tree: any) => [tree.type, Object.keys(tree.props ?? {}).sort().join(), tree.children.map((c: any) => c.type).join(), tree.children.at(-1).props.role, 'gap' in tree.children[0].props]
-    const closable = ['Box', 'flexDirection,gap', 'Box,Button', 'dismiss', false]
+    const shape = (tree: any) => [tree.type, Object.keys(tree.props ?? {}).sort().join(), tree.children.map((c: any) => c.type).join(), tree.children.at(-1).props.role]
+    const closable = ['Box', 'flexDirection,gap', 'Box,Button', 'dismiss']
     expect(shape(await ui.drawn())).toEqual(closable)
     await ui.press({ key: 'close' })
     expect(await isHeld(ui)).toBe(false)
@@ -1106,6 +1107,40 @@ describe('hold card', () => {
     await $.command.run(run('cache-watch', 'preview receipt'))
     await ui.press({ key: 'resume-dismiss' })
     expect(await ui.find({ text: /Resuming a cold chat|Cold write paid/ })).toBeUndefined()
+  })
+
+  test('on the desktop the hold card takes the band from another mod, and every other card gives way to it', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, [], { bandText: 'another mod' })
+    on('prompt.fill', () => ({ isFilled: true }))
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
+    await $.turn.complete(turn())
+    await $.command.run(run('cache-watch', 'preview resume'))
+    await $.command.run(run('cache-watch', 'preview receipt'))
+    const ui = await $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'AbovePrompt', props: tallBand })
+    const drawn: any = await ui.drawn()
+    expect([drawn.type, drawn.children]).toEqual(['Text', ['another mod']])
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('held'))
+    expect(await isHeld(ui)).toBe(true)
+    expect(await ui.find({ text: /another mod/ })).toBeUndefined()
+  })
+
+  test('a terminal stacks its cards under another mod\'s', async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [], { bandText: 'another mod' })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.turn.complete(turn())
+    await $.command.run(run('cache-watch', 'preview receipt'))
+    const ui = await $.ui.mount({ plugin: 'cache-watch', surface: 'terminal', component: 'AbovePrompt', props: tallBand })
+    expect(await ui.find({ text: /another mod/ })).toBeDefined()
+    expect(await ui.find({ text: /Cold write paid/ })).toBeDefined()
+  })
+
+  test('helpers: a band is blank only when it draws nothing', () => {
+    expect(isBlank(null)).toBe(true)
+    expect(isBlank({ type: 'Box', props: {}, children: [{ type: 'Text', props: {}, children: [' '] }] } as never)).toBe(true)
+    expect(isBlank({ type: 'Box', props: {}, children: [{ type: 'Button', props: { label: '1' } }] } as never)).toBe(false)
   })
 
   test('a terminal keeps the labelled buttons where they stand', async ($, on) => {
@@ -1241,7 +1276,7 @@ describe('footer label', () => {
   test('the band drops its row once the footer draws, and footer off brings it back', async ($, on) => {
     const clock = mock.clock(on, { now: 10 * HOUR })
     const store = new Map<string, unknown>()
-    world(on, [], { store, bandText: 'other mod' })
+    world(on, [], { store })
     await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
     await $.turn.complete(turn())
     const band = await $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
@@ -1252,7 +1287,6 @@ describe('footer label', () => {
     // The footer's first draw redraws the band on the next tick.
     await clock.advance(1)
     expect(await band.find({ type: 'Text', text: 'cache-watch' })).toBe(undefined)
-    expect((await band.find({ text: /^other mod$/ }))?.text).toBe('other mod')
 
     expect((await $.command.run(run('cache-watch', 'footer off'))).text).toBe('cache-watch: the status is back in the band above the prompt.')
     expect(store.get('footer')).toBe('off')

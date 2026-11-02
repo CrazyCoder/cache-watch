@@ -378,6 +378,13 @@ export function footerLabel(s: State, now: number): FooterLabel | undefined {
 
 export const isBandSurface = (surface: unknown) => surface === 'terminal' || surface === 'desktop'
 
+/** Whether a band draws nothing: no element, blank text, or Box and Text holding only that. */
+export function isBlank(el: RenderElement | string | null | undefined): boolean {
+  if (el == null) return true
+  if (typeof el === 'string') return el.trim() === ''
+  return (el.type === 'Box' || el.type === 'Text') && (el.children ?? []).every(isBlank)
+}
+
 /** Whether a surface that draws the band is attached now. session.start's own `surface` is null when a host such as the desktop app runs the session. */
 async function hasBandSurface($: EngineInterface): Promise<boolean> {
   try {
@@ -1048,11 +1055,11 @@ export const register: Register = (on, options) => {
     if (!s.hasBand || e.props.hasSurvey) return rest
     // The desktop draws its close control at the band's top right only for this shape: a row of one Box and
     // the Button, on a row that has nothing but flexDirection and gap. Any other shape leaves a labelled button.
-    // The gap stays among the cards: beside an empty `rest` it would push them down from the band's top.
+    // It shapes the band's top level only, so a card never wraps `rest`: that would take the other mod's close control.
     const closable = (cards: RenderElement[], close: RenderElement, gap = 0) => {
       const { Box } = $.ui.resolve(e)
       return Box({ flexDirection: 'row', gap: 1, children: [
-        Box({ flexDirection: 'column', flexGrow: 1, children: [rest, Box({ flexDirection: 'column', gap, children: cards })] }),
+        Box({ flexDirection: 'column', flexGrow: 1, gap, children: cards }),
         close,
       ] })
     }
@@ -1151,6 +1158,8 @@ export const register: Register = (on, options) => {
       if (e.surface === 'desktop') return closable([holdCard, buttons], close, compact ? 0 : 1)
       return Box({ flexDirection: 'column', gap: compact ? 0 : 1, children: [rest, holdCard, buttons] })
     }
+    // The desktop has one band and one close control: the hold card takes the band, anything else gives way to another mod's card.
+    if (e.surface === 'desktop' && !isBlank(rest)) return rest
     // A cold resume's note, styled like the compact hold card, in place of a transcript line no hook can restyle.
     const note = await read($, resumed)
     const notice: RenderElement[] = []

@@ -106,6 +106,10 @@ The card goes when you send a message, run `/clear`, or press either button. You
 
 After a paid cold write, a receipt pill above the prompt box says what the write cost and how long keepwarm now holds the cache. After a send that compacted first, it says what the smaller write cost and from what size the conversation was compacted. It goes at your next message, after 15 minutes, or when you press **Dismiss**, a cross at the top right in the desktop app.
 
+## Sharing the band with other mods
+
+The desktop app has one band above the prompt box and gives it one close control, so cards from two mods can't stand there side by side, each with its own cross. On the desktop the hold card takes the whole band, because your message waits on it. The resume card, the receipt pill and the status row give way while a mod listed after cache-watch draws there, such as prompt suggestions, and come back when it goes. A terminal stacks cache-watch's cards under the other mod's.
+
 ## Settings and environment
 
 Options live in `/config`, or under `pluginConfigs` in `settings.json`:
