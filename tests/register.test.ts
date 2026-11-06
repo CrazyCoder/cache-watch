@@ -73,8 +73,8 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { compact?: () => { skip
   on('classic.SessionStart', () => ({}))
   on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
   on('ui.status', ($, e) => { status.push(e.text); return { value: undefined } })
-  // The footer stub draws its labels, so a test can see what a hook passed down.
-  on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: [e.component === 'SessionMode' ? ['modes', ...e.props.modes].join(' & ') : opts.bandText ?? ''] }))
+  // The footer stub draws its labels, so a test can see what a hook passed down, and nothing without labels, as the engine.
+  on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: [e.component !== 'SessionMode' ? opts.bandText ?? '' : e.props.modes.length ? ['modes', ...e.props.modes].join(' & ') : ''] }))
   on('model.fork', async () => {
     forks.push(forks.length)
     if (opts.gate) await opts.gate()
@@ -1249,6 +1249,17 @@ describe('footer label', () => {
     // A cold cache redraws every 5 minutes, so the figure can trail the clock.
     expect((await ui.find({ type: 'Text', text: /^cache/ }))?.text).toMatch(/^cache cold for [56]m$/)
     expect((await ui.find({ type: 'Text', text: /^cold$/ }))?.props.color).toBe('#d97757')
+  })
+
+  test('terminal: a space parts the label from a pill to its left when the app has no labels', async ($, on) => {
+    mock.clock(on, { now: 10 * HOUR })
+    world(on, [])
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.turn.complete(turn())
+    const bare = await $.ui.mount({ plugin: 'cache-watch', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+    expect((await bare.find({ type: 'Box' }))?.text).toBe(' cache warm · 1h00m left')
+    const desktop = await $.ui.mount({ plugin: 'cache-watch', surface: 'desktop', component: 'SessionMode', props: { modes: [] } })
+    expect((await desktop.find({ type: 'Box' }))?.text).toBe('cache warm · 1h00m left')
   })
 
   test('keepwarm shows its time left, with no state until the first turn', async ($, on) => {

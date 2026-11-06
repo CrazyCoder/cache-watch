@@ -1286,8 +1286,12 @@ export const register: Register = (on, options) => {
       ? ['cache ', Text({ color, bold: true, children: [label.state] }), sep, label.detail]
       : ['cache', sep, label.detail] })
     const rest = await next(e).catch(() => Box({ children: [] }))
-    // No gap beside an empty set of labels: the footer's width is tight.
-    return Box({ flexDirection: 'row', alignItems: 'center', gap: e.props.modes.length ? 1 : 0, children: [rest, words] })
+    if (e.props.modes.length) return Box({ flexDirection: 'row', alignItems: 'center', gap: 1, children: [rest, words] })
+    // The terminal draws the footer's pills (/rc, ide, cloud) just left of the labels and parts them with ` · ` only
+    // when there are labels; the hook is not told whether a pill is there, so a space keeps the two apart. The desktop
+    // footer's width is tight, so it gets none.
+    const lead = e.surface === 'terminal' ? [Text({ children: [' '] })] : []
+    return Box({ flexDirection: 'row', alignItems: 'center', children: [rest, ...lead, words] })
   })
 
   on('session.attach', async ($, e, next) => {
