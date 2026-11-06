@@ -3088,6 +3088,22 @@ describe('compacting a cold send', () => {
     expect(w.entered).toEqual(['hi'])
   })
 
+  test('a /compact another mod answered without reaching this one still counts as compacted', { options: { coldCompact: true } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let count = 40
+    on('session.messages', () => ({ value: Array.from({ length: count }, () => ({ role: 'user', content: 'x' })) as never }))
+    const w = world(on, [], { compact: () => { throw new Error('not available in a headless session') } })
+    on('command.run', { command: 'compact' }, () => { count = 3; return { text: '' } })
+    await $.session.start({ ...session, surface: 'desktop', isInteractive: true })
+    for await (const c of $.turn.step({ turnId: 'first', index: 0, model: 'claude-fable-5-1', messageCount: 40 })) void c
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'bridge' } })
+    await clock.advance(1)
+    expect(w.entered).toEqual(['hi'])
+    expect(w.logs.at(-1)).toMatch(/^compacted from .* before sending/)
+  })
+
   test('a refused compaction still sends the message, and the write is scored', { options: { coldCompact: true } }, async ($, on) => {
     const clock = mock.clock(on, { now: START })
     const w = world(on, [], { compact: () => ({ skip: 'below 25% minimum' }) })
