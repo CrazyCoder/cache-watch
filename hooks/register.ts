@@ -694,9 +694,9 @@ const resumed = atom({ plugin: 'cache-watch', key: 'resumed' } as const, null)
 const snapshot = atom({ plugin: 'cache-watch', key: 'snapshot' } as const, null)
 
 async function remember($: EngineInterface, s: State) {
-  const { sid, lastRequestAt, lastModel, ctx, compacted, ackedAt, last, stopped } = s
+  const { sid, lastRequestAt, lastModel, ctx, compacted, ackedAt, last, stopped, transcript } = s
   const misses = [...s.misses]
-  await update($, snapshot, () => ({ sid, lastRequestAt, lastModel, ctx, compacted, ackedAt, misses, last, stopped }))
+  await update($, snapshot, () => ({ sid, lastRequestAt, lastModel, ctx, compacted, ackedAt, misses, last, stopped, transcript }))
 }
 
 /** Puts back what the mod knew before a reload, when it was about this conversation. */
@@ -888,6 +888,16 @@ async function afterCompact($: EngineInterface, s: State) {
 }
 
 /**
+ * A compaction whose session.compact never reached this mod: a mod earlier in the chain, such as JetCompact, answers it
+ * without calling next. A transcript under half the messages of the last request is read as one, as turn.step reads it.
+ */
+async function noticeCompaction($: EngineInterface, s: State) {
+  if (s.compacted || !s.transcript) return
+  const count = await $.session.messages({ as: 'api' }).then(m => m.length, () => 0)
+  if (count && count * 2 < s.transcript) await afterCompact($, s)
+}
+
+/**
  * Compacts between turns. A hook cannot: both calls refuse inside `prompt.submit`, whose turn they would wait on.
  * An SDK session, as the desktop app runs, has no `$.session.compact`; `/compact` there resolves once it is done, and its
  * session.compact reaches this mod's hook. Resolves whether it compacted; a refusal, from JetCompact or the engine, is false.
@@ -902,7 +912,9 @@ async function compactNow($: EngineInterface, s: State): Promise<boolean> {
       const { skip } = await $.session.compact()
       if (skip === undefined) await afterCompact($, s)
     } catch {
-      if (!late) await $.command.run({ command: 'compact' }).catch(() => undefined)
+      if (late) return
+      await $.command.run({ command: 'compact' }).catch(() => undefined)
+      await noticeCompaction($, s)
     }
   }
   await Promise.race([compact(), new Promise<void>(done => { $.clock.after(COMPACT_WAIT_MS, () => { late = true; done() }) })])
@@ -1517,6 +1529,7 @@ export const register: Register = (on, options) => {
       await enqueue($, s, e.text)
       return { drop: COMPACTING_DROP }
     }
+    if (isCold(s, now) && s.ctx >= BIG_TOKENS) await noticeCompaction($, s)
     if (!isCold(s, now) || s.ctx < BIG_TOKENS) return next(e)
     // Nobody at a phone can choose on a card, so the cheap way out is taken for them. Only a timer can compact, and only between turns.
     if (s.coldCompact && isRemote(e.origin) && canHold(e.text, e.attachments) && !s.running && !s.compacting) {

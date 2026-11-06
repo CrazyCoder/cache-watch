@@ -2631,6 +2631,34 @@ describe('a managed plugin above the user tier', () => {
     expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/session     0 cold writes paid/)
   })
 
+  test('a cold send after a compaction that never reached the mod goes straight through', { plugins: [managed] }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    let count = 40
+    on('session.messages', () => ({ value: Array.from({ length: count }, () => ({ role: 'user', content: 'x' })) as never }))
+    const w = world(on, [])
+    await $.session.start(session)
+    await step($, 'first', 0, 40)
+    await $.turn.complete(turn())
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
+    count = 3
+    await clock.advance(3 * HOUR)
+    await $.prompt.submit(prompt('after compact'))
+    expect(w.entered).toEqual(['after compact'])
+    expect((await $.command.run(run('cache-watch', ''))).text).toMatch(/state       reset by compaction/)
+  })
+
+  test('a cold send with the transcript as long as before is still held', { plugins: [managed] }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    on('session.messages', () => ({ value: Array.from({ length: 41 }, () => ({ role: 'user', content: 'x' })) as never }))
+    const w = world(on, [])
+    await $.session.start(session)
+    await step($, 'first', 0, 40)
+    await $.turn.complete(turn())
+    await clock.advance(3 * HOUR)
+    expect((await $.prompt.submit(prompt('hi'))).drop).toBeTruthy()
+    expect(w.entered).toEqual([])
+  })
+
   test('a summary written after a warm request in the same turn is no cold write', { plugins: [managed] }, async ($, on) => {
     mock.clock(on, { now: START })
     const w = world(on, [], { steps: [usage(), usage(), usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 150000 })] })

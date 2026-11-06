@@ -53,6 +53,8 @@ export type Snapshot = {
   misses: Array<{ at: number; tokens: number; usd: number | null }>
   last: { at: number; read: number; write: number; usd: number | null; warm: boolean } | null
   stopped: string | null
+  /** Messages the last request carried, to read a compaction no hook saw off a shorter transcript. Absent in older snapshots. */
+  transcript?: number
 }
 
 declare module 'claude-code' {
